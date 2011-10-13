@@ -1,3 +1,5 @@
+THIS IS JUST A "BACKUP" FORK, THE ORIGINAL PROJECT IS HERE https://github.com/chraft/c-raft.
+
 C#raft Development Readme
 =============================
 
