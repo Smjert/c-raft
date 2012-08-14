@@ -41,7 +41,6 @@ namespace ChraftTestClient
             Register(PacketType.Handshake, 0, 3, ReadHandshake);
             Register(PacketType.ChatMessage, 0, 3, ReadChatMessage);
             Register(PacketType.Disconnect, 0, 3, ReadDisconnect);
-            Register(PacketType.PreChunk, 10, 0, ReadPreChunk);
             Register(PacketType.MapChunk, 0, 18, ReadMapChunk);
             Register(PacketType.TimeUpdate, 9, 0, ReadTimeUpdate);
             Register(PacketType.BlockChange, 12, 0, ReadBlockChange);

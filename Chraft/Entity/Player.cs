@@ -297,12 +297,16 @@ namespace Chraft.Entity
                     PickupItem((ItemEntity)e);
             }
 
+            Queue<int> entitiesToRemove = new Queue<int>();
             foreach (EntityBase e in LoadedEntities.Values.Where(e => !nearbyEntities.ContainsKey(e.EntityId)))
             {
                 EntityBase unused;
                 LoadedEntities.TryRemove(e.EntityId, out unused);
-                _client.SendDestroyEntity(e);
+                entitiesToRemove.Enqueue(e.EntityId);
             }
+
+            if(entitiesToRemove.Count > 0)
+                _client.SendDestroyEntities(entitiesToRemove.ToArray());
         }
 
         public void StartCrouching()
@@ -682,7 +686,6 @@ namespace Chraft.Entity
                         }
 
                         chunk.AddClient(Client);
-                        _client.SendPreChunk(x, z, true, sync);
                         _client.SendChunk(chunk, sync);
                     }
                 }
@@ -700,11 +703,8 @@ namespace Chraft.Entity
 
 
                     if (chunk != null)
-                    {
                         chunk.RemoveClient(_client);
-                        _client.SendPreChunk(UniversalCoords.FromPackedChunkToX(c),
-                                             UniversalCoords.FromPackedChunkToZ(c), false, sync);
-                    }
+                    
                 }
             }
 

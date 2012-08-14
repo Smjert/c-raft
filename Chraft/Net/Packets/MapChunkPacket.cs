@@ -198,14 +198,13 @@ namespace Chraft.Net.Packets
             Console.WriteLine("1: {0}->{1}bytes in {2}ms", data.Length, deflateLength, deflateTime);
 #endif
 
-            SetCapacity(22 + len);
+            SetCapacity(18 + len);
             Writer.Write(Coords.ChunkX);
             Writer.Write(Coords.ChunkZ);
             Writer.Write(false); // Ground Up Continous
             Writer.Write((ushort)primaryBitMask);
             Writer.Write((ushort)0); // Add BitMask
             Writer.Write(len);
-            Writer.Write(0); // Unused
             Writer.Write(comp, 0, len);
 
 #if PROFILE_MAPCHUNK

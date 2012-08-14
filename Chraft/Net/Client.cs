@@ -19,6 +19,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -94,6 +95,10 @@ namespace Chraft.Net
         /// A reference to the server logger.
         /// </summary>
         internal Logger Logger { get { return Server.Logger; } }
+
+        internal byte[] SharedKey { get; set; }
+        internal ICryptoTransform Encrypter { get; set; }
+        internal ICryptoTransform Decrypter { get; set; }
 
         /// <summary>
         /// Instantiates a new Client object.
@@ -282,7 +287,7 @@ namespace Chraft.Net
                 {
                     if (client != this)
                     {
-                        DestroyEntityPacket de = new DestroyEntityPacket {EntityId = _player.EntityId};
+                        DestroyEntityPacket de = new DestroyEntityPacket { EntitiesId = new [] { _player.EntityId } };
                         de.Write();
                         byte[] data = de.GetBuffer();
                         client.Send_Sync(data);

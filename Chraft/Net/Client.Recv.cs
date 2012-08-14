@@ -16,6 +16,7 @@
 #endregion
 using System;
 using System.Linq;
+using System.Security.Cryptography;
 using Chraft.Net.Packets;
 using Chraft.PluginSystem.Net;
 using Chraft.PluginSystem.Server;
@@ -764,6 +765,11 @@ namespace Chraft.Net
             }
         }
 
+        public static void HandleLocaleAndViewDistance(Client client, LocaleAndViewDistancePacket packet)
+        {
+            
+        }
+
         internal void StopUpdateChunks()
         {
             if (_updateChunksToken != null)
@@ -819,41 +825,70 @@ namespace Chraft.Net
 
         public static void HandlePacketHandshake(Client client, HandshakePacket packet)
         {
-            var usernameHost = Regex.Replace(packet.UsernameAndIpOrHash, Chat.DISALLOWED, "").Split(';');
-            client.Username = usernameHost[0];
-            client.Host = usernameHost[1];
-            client.SendHandshake();
+            client.Username = packet.Username;
+            if (!client.CheckUsername(packet.Username))
+                client.Kick("Inconsistent username");
+            if (packet.ProtocolVersion < ProtocolVersion)
+                client.Kick("Outdated client");
+            else
+            {
+                client.Host = packet.ServerHost + ":" + packet.ServerPort;
+
+                if (client.Server.EncryptionEnabled)
+                    client.SendEncryptionRequest();
+                else
+                    Task.Factory.StartNew(client.SendLoginSequence);
+            }         
         }
 
         public static void HandlePacketLoginRequest(Client client, LoginRequestPacket packet)
         {
-            if (!client.CheckUsername(packet.Username))
-                client.Kick("Inconsistent username");
-            else if (packet.ProtocolOrEntityId < ProtocolVersion)
-                client.Kick("Outdated client");
-            else
+            Task.Factory.StartNew(client.SendLoginSequence);
+        }
+
+        public static void HandleClientStatus(Client client, ClientStatusPacket packet)
+        {
+            if(packet.Status == 0)
+                Task.Factory.StartNew(client.SendLoginSequence);
+        }
+
+        public static void HandleEncryptionResponse(Client client, EncryptionKeyResponse packet)
+        {
+            client.SharedKey = PacketCryptography.Decrypt(packet.SharedSecret);
+            RijndaelManaged aes = PacketCryptography.GenerateAES(client.SharedKey);
+            client.Encrypter = aes.CreateEncryptor();
+            client.Decrypter = aes.CreateDecryptor();
+
+            byte[] packetToken = new byte[4];
+
+            client.Decrypter.TransformBlock(packet.VerifyToken, 0, 4, packetToken, 0);
+
+            if (!packetToken.SequenceEqual(packet.VerifyToken))
             {
-                if (client.Server.UseOfficalAuthentication)
+                client.Kick("Wrong token");
+                return;
+            }
+
+            if (client.Server.UseOfficalAuthentication)
+            {
+                try
                 {
-                    try
+                    string authenticated = Http.GetHttpResponse(new Uri(String.Format("http://www.minecraft.net/game/checkserver.jsp?user={0}&serverId={1}", client.Username, client.Server.ServerHash)));
+                    if (authenticated != "YES")
                     {
-                        string authenticated = Http.GetHttpResponse(new Uri(String.Format("http://www.minecraft.net/game/checkserver.jsp?user={0}&serverId={1}", packet.Username, client.Server.ServerHash)));
-                        if (authenticated != "YES")
-                        {
-                            client.Kick("Authentication failed");
-                            return;
-                        }
-                    }
-                    catch (Exception exc)
-                    {
-                        client.Kick("Error while authenticating...");
-                        client.Logger.Log(exc);
+                        client.Kick("Authentication failed");
                         return;
                     }
                 }
-
-                Task.Factory.StartNew(client.SendLoginSequence);
+                catch (Exception exc)
+                {
+                    client.Kick("Error while authenticating...");
+                    client.Logger.Log(exc);
+                    return;
+                }
             }
+
+            client.Send_Sync_Packet(new EncryptionKeyResponse());
         }
 
         #endregion

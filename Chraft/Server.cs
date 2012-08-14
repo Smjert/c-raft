@@ -20,6 +20,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Chraft.Commands;
 using Chraft.Interfaces;
@@ -179,6 +180,8 @@ namespace Chraft
 
         public int ClientsConnectionSlots;
 
+        public RSAParameters ServerKey;
+        public bool EncryptionEnabled = true;
         
         public Server()
         {
@@ -215,6 +218,8 @@ namespace Chraft
             PlayersToSave = new ConcurrentQueue<Client>();
             PlayersToSavePostponed = new ConcurrentQueue<Client>();
             _generators = new Dictionary<string, IChunkGenerator>();
+
+            ServerKey = PacketCryptography.GeneratePublicKey();
         }
 
         public IPluginManager GetPluginManager()
@@ -257,10 +262,10 @@ namespace Chraft
 
         internal string GetRandomServerHash()
         {
-            byte[] bytes = new byte[7];
+            byte[] bytes = new byte[8];
             Rand.NextBytes(bytes);
 
-            return "23" + BitConverter.ToString(bytes).Replace("-", String.Empty);
+            return BitConverter.ToString(bytes).Replace("-", "");
         }
 
         public static Recipe[] GetRecipes()
@@ -556,7 +561,10 @@ namespace Chraft
 
                 Interlocked.Exchange(ref client.TimesEnqueuedForRecv, 0);
                 ByteQueue bufferToProcess = client.GetBufferToProcess();
-
+                if(client.Decrypter != null)
+                    client.Decrypter.TransformBlock(bufferToProcess.UnderlyingBuffer, 0,
+                                                bufferToProcess.UnderlyingBuffer.Length,
+                                                bufferToProcess.UnderlyingBuffer, 0);
                 int length = client.FragPackets.Size + bufferToProcess.Size;
                 while (length > 0)
                 {
@@ -1166,8 +1174,7 @@ namespace Chraft
                         {
                             EntityId = entity.EntityId,
                             Slot = i,
-                            ItemId = -1,
-                            Durability = 0
+                            Item = ItemStack.Void
                         });
                     }
 
@@ -1193,7 +1200,7 @@ namespace Chraft
 
         public void SendRemoveEntityToNearbyPlayers(IWorldManager world, IEntityBase entity)
         {
-            SendPacketToNearbyPlayers(world as WorldManager, UniversalCoords.FromAbsWorld(entity.Position), new DestroyEntityPacket { EntityId = entity.EntityId }, entity is Player ? ((Player)entity).Client : null);
+            SendPacketToNearbyPlayers(world as WorldManager, UniversalCoords.FromAbsWorld(entity.Position), new DestroyEntityPacket { EntitiesCount = 1, EntitiesId = new []{ entity.EntityId} }, entity is Player ? ((Player)entity).Client : null);
         }
 
         // TODO: This should be removed in favor of the one below
