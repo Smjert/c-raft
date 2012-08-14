@@ -1,11 +1,29 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
 using Chraft.Entity;
 using Chraft.Interfaces;
-using Chraft.Plugins.Events.Args;
-using Chraft.World.Blocks.Interfaces;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.World;
+using Chraft.PluginSystem.World.Blocks;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Collision;
+using Chraft.Utilities.Coords;
+using Chraft.World.Blocks.Base;
 
 namespace Chraft.World.Blocks
 {
@@ -21,10 +39,12 @@ namespace Chraft.World.Blocks
             IsAir = true;
             IsSolid = true;
             IsSingleHit = true;
+            IsWaterProof = true;
             LootTable.Add(new ItemStack((short)BlockData.Items.Reeds, 1));
+            BlockBoundsOffset = new BoundingBox(0.125, 0, 0.125, 0.875, 1, 0.875);
         }
 
-        public override void NotifyDestroy(EntityBase entity, StructBlock sourceBlock, StructBlock targetBlock)
+        protected override void NotifyDestroy(EntityBase entity, StructBlock sourceBlock, StructBlock targetBlock)
         {
             if ((targetBlock.Coords.WorldY - sourceBlock.Coords.WorldY) == 1 &&
                 targetBlock.Coords.WorldX == sourceBlock.Coords.WorldX &&
@@ -45,10 +65,17 @@ namespace Chraft.World.Blocks
                 return false;
 
             bool isWater = false;
-            block.Chunk.ForNSEW(targetBlock.Coords,
+
+            Chunk chunk = GetBlockChunk(block);
+
+            if (chunk == null)
+                return false;
+
+            chunk.ForNSEW(targetBlock.Coords,
                 delegate(UniversalCoords uc)
                 {
-                    if (block.World.GetBlockId(uc) == (byte)BlockData.Blocks.Water || block.World.GetBlockId(uc) == (byte)BlockData.Blocks.Still_Water)
+                    byte? blockId = block.World.GetBlockId(uc);
+                    if (blockId != null && (blockId == (byte)BlockData.Blocks.Water || blockId == (byte)BlockData.Blocks.Still_Water))
                         isWater = true;
                 });
 
@@ -58,81 +85,82 @@ namespace Chraft.World.Blocks
             return base.CanBePlacedOn(who, block, targetBlock, targetSide);
         }
 
-        public bool CanGrow(StructBlock block)
+        public bool CanGrow(IStructBlock iBlock, IChunk iChunk)
         {
+            StructBlock block = (StructBlock) iBlock;
+            Chunk chunk = (Chunk)iChunk;
+            if (chunk == null)
+                return false;
+
             // Can't grow above the sky
             if (block.Coords.WorldY == 127)
                 return false;
 
             // Can grow only if the block above is free
-            byte blockId = block.World.GetBlockId(UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY + 1, block.Coords.WorldZ));
+            byte blockId = (byte)chunk.GetType(UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY + 1, block.Coords.WorldZ));
             if (blockId != (byte)BlockData.Blocks.Air)
                 return false;
 
             // MetaData = 0x0 is a freshly planted reed (sugar cane).
             // The data value is incremented randomly.
             // When it becomes 15, a new reed block is created on top as long as the total height does not exceed 3.
-            int maxHeight = 3;
 
             // Calculating the reed length below this block
             int reedHeightBelow = 0;
             for (int i = block.Coords.WorldY - 1; i >= 0; i--)
             {
-                if (block.World.GetBlockId(block.Coords.WorldX, i, block.Coords.WorldZ) != (byte)BlockData.Blocks.Reed)
+                if (chunk.GetType(block.Coords.BlockX, i, block.Coords.BlockZ) != BlockData.Blocks.Reed)
                     break;
                 reedHeightBelow++;
             }
 
             // If the total reed height is bigger than the maximal height - it'll not grow
-            if ((reedHeightBelow + 1) >= maxHeight)
+            if ((reedHeightBelow + 1) >= MaxHeight)
                 return false;
 
             // Checking if there are water next to the basement block
             bool isWater = false;
-            blockId = 0;
-            block.Chunk.ForNSEW(UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY - 1, block.Coords.WorldZ),
+
+            chunk.ForNSEW(UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY - reedHeightBelow - 1, block.Coords.WorldZ),
                 delegate(UniversalCoords uc)
-                    {
-                        blockId = block.World.GetBlockId(uc);
-                    if (blockId == (byte)BlockData.Blocks.Water || blockId == (byte)BlockData.Blocks.Still_Water)
+                {
+                    byte? blockIdBelow = block.World.GetBlockId(uc);
+                    if (blockIdBelow != null && (blockIdBelow == (byte)BlockData.Blocks.Water || blockIdBelow == (byte)BlockData.Blocks.Still_Water))
                     {
                         isWater = true;
                     }
                 });
 
-            if (!isWater && reedHeightBelow == 0)
+            if (!isWater && reedHeightBelow < MaxHeight)
             {
                 UniversalCoords baseBlock = UniversalCoords.FromWorld(block.Coords.WorldX,
                                                                       block.Coords.WorldY - reedHeightBelow,
                                                                       block.Coords.WorldZ);
-                BlockHelper.Instance(block.Type).Destroy(new StructBlock(baseBlock, block.Type, block.MetaData, block.World));
+                BlockHelper.Instance.CreateBlockInstance(block.Type).Destroy(new StructBlock(baseBlock, block.Type, block.MetaData, block.World));
                 return false;
             }
 
             return true;
         }
 
-        public void Grow(StructBlock block)
+        public void Grow(IStructBlock iBlock, IChunk iChunk)
         {
-            if (!CanGrow(block))
+            Chunk chunk = iChunk as Chunk;
+            StructBlock block = (StructBlock) iBlock;
+            if (!CanGrow(block, iChunk))
                 return;
 
-            bool willGrow = (block.World.Server.Rand.Next(2) == 0);
-            //if (block.MetaData < 0xe) // 14
-            if (block.MetaData < 1) // 14
+            if (block.MetaData < 0xe) // 14
             {
-                if (willGrow)
-                    block.World.SetBlockData(block.Coords, ++block.MetaData);
+                chunk.SetData(block.Coords, ++block.MetaData);
                 return;
             }
 
-            if (!willGrow)
-                return;
-
-            block.World.SetBlockData(block.Coords, 0);
+            chunk.SetData(block.Coords, 0);
             UniversalCoords blockAbove = UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY + 1,
                                                                    block.Coords.WorldZ);
-            block.World.SetBlockAndData(blockAbove, (byte)BlockData.Blocks.Reed, 0x0);
+            StructBlock newReed = new StructBlock(blockAbove, (byte)Type, 0, block.World);
+            BlockHelper.Instance.CreateBlockInstance((byte)Type).Spawn(newReed);
         }
     }
 }

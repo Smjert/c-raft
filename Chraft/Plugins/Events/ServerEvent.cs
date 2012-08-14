@@ -1,18 +1,33 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using Chraft.Plugins.Listener;
-using Chraft.Plugins.Events.Args;
+using Chraft.PluginSystem.Args;
+using Chraft.PluginSystem.Event;
+using Chraft.PluginSystem.Listener;
 
 namespace Chraft.Plugins.Events
 {
-    public class ServerEvent : ChraftEventHandler
+    public class ServerEvent : IChraftEventHandler
     {
         public ServerEvent()
         {
-            events.AddRange(new Event[] {Event.SERVER_BROADCAST, Event.SERVER_CHAT, Event.SERVER_COMMAND,
-            Event.SERVER_ACCEPT, Event.LOGGER_LOG});
+            events.AddRange(new Event[] {Event.ServerBroadcast, Event.ServerChat, Event.ServerCommand,
+            Event.ServerAccept, Event.LoggerLog});
         }
         public EventType Type { get { return EventType.Player; } }
         public List<Event> Events { get { return events; } }
@@ -24,26 +39,26 @@ namespace Chraft.Plugins.Events
         {
             switch (Event)
             {
-                case Event.LOGGER_LOG:
+                case PluginSystem.Event.Event.LoggerLog:
                     OnLog(e as LoggerEventArgs);
                     break;
-                case Event.SERVER_ACCEPT:
+                case PluginSystem.Event.Event.ServerAccept:
                     OnAccept(e as ClientAcceptedEventArgs);
                     break;
-                case Event.SERVER_BROADCAST:
+                case PluginSystem.Event.Event.ServerBroadcast:
                     OnBroadcast(e as ServerBroadcastEventArgs);
                     break;
-                case Event.SERVER_CHAT:
+                case PluginSystem.Event.Event.ServerChat:
                     OnChat(e as ServerChatEventArgs);
                     break;
-                case Event.SERVER_COMMAND:
+                case PluginSystem.Event.Event.ServerCommand:
                     OnCommand(e as ServerCommandEventArgs);
                     break;
             }
         }
-        public void RegisterEvent(EventListener Listener)
+        public void RegisterEvent(EventListener listener)
         {
-            plugins.Add(Listener);
+            plugins.Add(listener);
         }
         #region Local Hooks
         private void OnBroadcast(ServerBroadcastEventArgs e)
@@ -51,7 +66,7 @@ namespace Chraft.Plugins.Events
             foreach (EventListener el in Plugins)
             {
                 ServerListener sl = (ServerListener)el.Listener;
-                if (el.Event == Event.SERVER_BROADCAST)
+                if (el.Event == Event.ServerBroadcast)
                     sl.OnBroadcast(e);
             }
         }
@@ -60,7 +75,7 @@ namespace Chraft.Plugins.Events
             foreach (EventListener el in Plugins)
             {
                 ServerListener sl = (ServerListener)el.Listener;
-                if (el.Event == Event.LOGGER_LOG)
+                if (el.Event == Event.LoggerLog)
                     sl.OnLog(e);
             }
         }
@@ -69,7 +84,7 @@ namespace Chraft.Plugins.Events
             foreach (EventListener el in Plugins)
             {
                 ServerListener sl = (ServerListener)el.Listener;
-                if (el.Event == Event.SERVER_ACCEPT)
+                if (el.Event == Event.ServerAccept)
                     sl.OnAccept(e);
             }
         }
@@ -78,7 +93,7 @@ namespace Chraft.Plugins.Events
             foreach (EventListener el in Plugins)
             {
                 ServerListener sl = (ServerListener)el.Listener;
-                if (el.Event == Event.SERVER_COMMAND)
+                if (el.Event == Event.ServerCommand)
                     sl.OnCommand(e);
             }
         }
@@ -87,7 +102,7 @@ namespace Chraft.Plugins.Events
             foreach (EventListener el in Plugins)
             {
                 ServerListener sl = (ServerListener)el.Listener;
-                if (el.Event == Event.SERVER_CHAT)
+                if (el.Event == Event.ServerChat)
                     sl.OnChat(e);
             }
         }

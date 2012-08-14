@@ -1,4 +1,20 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -11,7 +27,6 @@ namespace Chraft.Net
 {
     public class PacketHandlers
     {
-
         private static PacketHandler[] m_Handlers;
 
         public static PacketHandler[] Handlers
@@ -40,9 +55,13 @@ namespace Chraft.Net
             Register(PacketType.EntityAction, 6, 0, ReadEntityAction);
             Register(PacketType.CloseWindow, 2, 0, ReadCloseWindow);
             Register(PacketType.WindowClick, 0, 10, ReadWindowClick);
-            Register(PacketType.CreativeInventoryAction, 9, 0, ReadCreativeInventoryAction);
+            Register(PacketType.CreativeInventoryAction, 0, 5, ReadCreativeInventoryAction);
             Register(PacketType.ServerListPing, 1, 0, ReadServerListPing);
             Register(PacketType.Disconnect, 0, 3, ReadDisconnect);
+            Register(PacketType.Transaction,5,0, ReadTransaction);
+            Register(PacketType.UpdateSign, 0, 11, ReadUpdateSign);
+            Register(PacketType.EnchantItem, 3, 0, ReadEnchantItem);
+            Register(PacketType.PlayerAbilities, 5, 0, ReadPlayerAbilities);
         }
 
         public static void Register(PacketType packetID, int length, int minimumLength, OnPacketReceive onReceive)
@@ -186,9 +205,8 @@ namespace Chraft.Net
             EntityActionPacket ea = new EntityActionPacket();
             ea.Read(reader);
 
-            // TODO: implement this packet
-            /*if (!reader.Failed)
-                Client.HandlePacketEntityAction(client, ea);*/
+            if (!reader.Failed)
+                Client.HandlePacketEntityAction(client, ea);
         }
 
         public static void ReadCloseWindow(Client client, PacketReader reader)
@@ -234,6 +252,42 @@ namespace Chraft.Net
 
             if (!reader.Failed)
                 Client.HandlePacketCreativeInventoryAction(client, ci);
+        }
+        public static void ReadTransaction(Client client, PacketReader reader)
+        {
+            TransactionPacket tp = new TransactionPacket();
+            tp.Read(reader);
+
+            if (!reader.Failed)
+                Client.HandleTransactionPacket(client, tp);
+        }
+
+        public static void ReadUpdateSign(Client client, PacketReader reader)
+        {
+            UpdateSignPacket us = new UpdateSignPacket();
+            us.Read(reader);
+
+            if (!reader.Failed)
+                Client.HandlePacketUpdateSign(client, us);
+        }
+
+        public static void ReadEnchantItem(Client client, PacketReader reader)
+        {
+            EnchantItemPacket ei = new EnchantItemPacket();
+            ei.Read(reader);
+
+            if(!reader.Failed)
+                Client.HandlePacketEnchantItem(client, ei);
+        }
+
+        public static void ReadPlayerAbilities(Client client, PacketReader reader)
+        {
+            PlayerAbilitiesPacket pa = new PlayerAbilitiesPacket();
+            pa.Read(reader);
+
+            if (!reader.Failed)
+                Client.HandlePacketPlayerActivites(client, pa);
+            
         }
     }
 }

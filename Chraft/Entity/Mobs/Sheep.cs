@@ -1,7 +1,32 @@
-﻿using System;
+#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using Chraft.Interfaces;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Item;
+using Chraft.PluginSystem.Net;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Math;
+using Chraft.Utilities.Misc;
 using Chraft.Utils;
 using Chraft.Net;
 using Chraft.Net.Packets;
@@ -9,27 +34,29 @@ using Chraft.World;
 
 namespace Chraft.Entity.Mobs
 {
-    public class Sheep: Mob
+    public class Sheep: Animal
     {
         public override string Name
         {
             get { return "Sheep"; }
         }
 
-        static ProportionValue<WoolColor>[] _woolColor = new[]{
-                ProportionValue.Create(0.8184, WoolColor.White), // 81.84% chance for White
-                ProportionValue.Create(0.05, WoolColor.Silver),  // 5% chance for light gray
-                ProportionValue.Create(0.05, WoolColor.Gray),    // 5% chance for gray
-                ProportionValue.Create(0.05, WoolColor.Black),   // 5% chance for black
-                ProportionValue.Create(0.03, WoolColor.Brown),   // 3% chance for brown
-                ProportionValue.Create(0.0016, WoolColor.Pink),  // 0.16% chance for pink
+        public override short MaxHealth { get { return 10; } }
+
+        static WeightedPercentValue<WoolColor>[] _woolColor = new[]{
+                WeightedPercentValue.Create(0.8184, WoolColor.White), // 81.84% chance for White
+                WeightedPercentValue.Create(0.05, WoolColor.Silver),  // 5% chance for light gray
+                WeightedPercentValue.Create(0.05, WoolColor.Gray),    // 5% chance for gray
+                WeightedPercentValue.Create(0.05, WoolColor.Black),   // 5% chance for black
+                WeightedPercentValue.Create(0.03, WoolColor.Brown),   // 3% chance for brown
+                WeightedPercentValue.Create(0.0016, WoolColor.Pink),  // 0.16% chance for pink
             };
 
         internal Sheep(Chraft.World.WorldManager world, int entityId, Chraft.Net.MetaData data = null)
             : base(world, entityId, MobType.Sheep, data)
         {
-            this.Data.Sheared = false;
-            this.Data.WoolColor = _woolColor.ChooseByRandom();
+            Data.Sheared = false;
+            Data.WoolColor = _woolColor.SelectRandom(world.Server.Rand);
         }
 
         protected WoolColor DyeColorToWoolColor(MetaData.Dyes dyeColor)
@@ -72,23 +99,23 @@ namespace Chraft.Entity.Mobs
             return WoolColor.White;
         }
 
-        protected override void DoInteraction(Client client, Interfaces.ItemStack item)
+        protected override void DoInteraction(IClient client, IItemStack item)
         {
             base.DoInteraction(client, item);
 
-            if (client != null && !Chraft.Interfaces.ItemStack.IsVoid(item))
+            if (client != null && item != null && !item.IsVoid())
             {
-                if (item.Type == (short)Chraft.World.BlockData.Items.Shears && !Data.Sheared)
+                if (item.Type == (short)BlockData.Items.Shears && !Data.Sheared)
                 {
                     // Drop wool when sheared
                     sbyte count = (sbyte)Server.Rand.Next(2, 4);
                     if (count > 0)
-                        Server.DropItem(World, UniversalCoords.FromWorld(Position.X, Position.Y, Position.Z), new Interfaces.ItemStack((short)Chraft.World.BlockData.Blocks.Wool, count, (short)Data.WoolColor));
+                        Server.DropItem(World, UniversalCoords.FromAbsWorld(Position.X, Position.Y, Position.Z), new Interfaces.ItemStack((short)BlockData.Blocks.Wool, count, (short)Data.WoolColor));
                     Data.Sheared = true;
 
                     SendMetadataUpdate();
                 }
-                else if (item.Type == (short)Chraft.World.BlockData.Items.Ink_Sack)
+                else if (item.Type == (short)BlockData.Items.Ink_Sack)
                 {
                     // Set the wool colour of this Sheep based on the item.Durability
                     // Safety check. Values of 16 and higher (color do not exist) may crash the client v1.8.1 and below
@@ -104,8 +131,9 @@ namespace Chraft.Entity.Mobs
 
         protected override void DoDeath(EntityBase killedBy)
         {
-            if (!this.Data.Sheared)
-                Server.DropItem(World, UniversalCoords.FromWorld(this.Position.X, this.Position.Y, this.Position.Z), new Interfaces.ItemStack((short)Chraft.World.BlockData.Blocks.Wool, 1, (short)this.Data.WoolColor));
+            if (!Data.Sheared)
+                Server.DropItem(World, UniversalCoords.FromAbsWorld(Position.X, Position.Y, Position.Z), new Interfaces.ItemStack((short)BlockData.Blocks.Wool, 1, (short)Data.WoolColor));
+            base.DoDeath(killedBy);
         }
     }
 }

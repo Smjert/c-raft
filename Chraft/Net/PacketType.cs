@@ -1,8 +1,19 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
 namespace Chraft.Net
 {
     public enum PacketType : byte
@@ -16,7 +27,7 @@ namespace Chraft.Net
         SpawnPosition = 0x06,               //   <--
         UseEntity = 0x07,                   //   -->
         UpdateHealth = 0x08,                //   <--
-		CreativeInventoryAction = 0x6B,     //   <--
+        CreativeInventoryAction = 0x6B,     //   <--
         Respawn = 0x09,                     //   <->
         Player = 0x0A,                      //   -->
         PlayerPosition = 0x0B,              //   -->
@@ -34,7 +45,7 @@ namespace Chraft.Net
         AddObjectVehicle = 0x17,            //   <--
         MobSpawn = 0x18,                    //   <--
         EntityPainting = 0x19,              //   <--
-        UnknownA = 0x1B,                    //   ???
+        ExperienceOrb = 0x1A,               //   <--
         EntityVelocity = 0x1C,              //   <--
         DestroyEntity = 0x1D,               //   <--
         Entity = 0x1E,                      //   <--
@@ -42,12 +53,13 @@ namespace Chraft.Net
         EntityLook = 0x20,                  //   <--
         EntityLookAndRelativeMove = 0x21,   //   <--
         EntityTeleport = 0x22,              //   <--
+        EntityHeadLook = 0x23,              //   <--
         EntityStatus = 0x26,                //   <--
-        ExperienceOrb = 0x1A,               //   <--
         AttachEntity = 0x27,                //   <--
         EntityMetadata = 0x28,              //   <--
         EntityEffect = 0x29,                //   <->
         RemoveEntityEffect = 0x2A,          //   <->
+        Experience = 0x2B,                  //   <--
         PreChunk = 0x32,                    //   <--
         MapChunk = 0x33,                    //   <--
         MultiBlockChange = 0x34,            //   <--
@@ -64,10 +76,14 @@ namespace Chraft.Net
         WindowItems = 0x68,                 //   <--
         UpdateProgressBar = 0x69,           //   <--
         Transaction = 0x6A,                 //   <->
+        EnchantItem = 0x6C,                 //   -->
         UpdateSign = 0x82,                  //   <->
         MapData = 0x83,                     //   -->
+        UpdateTileEntity = 0x84,            //   <--
         IncrementStatistic = 0xC8,          //   ???
         PlayerListItem = 0xC9,              //   <--
+        PlayerAbilities = 0xCA,             //   <--> 
+        PluginMessage = 0xFA,               //  
         ServerListPing = 0xFE,              //   -->
         Disconnect = 0xFF                   //   <->
     }

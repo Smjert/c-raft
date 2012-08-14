@@ -1,107 +1,160 @@
+#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using Chraft.Commands;
 using Chraft.Entity;
-using Chraft.Entity.Mobs;
-using Chraft.Net;
 using Chraft.Net.Packets;
+using Chraft.PluginSystem.Args;
+using Chraft.PluginSystem.Entity;
+using Chraft.PluginSystem.Event;
+using Chraft.PluginSystem.Net;
+using Chraft.PluginSystem.Server;
 using Chraft.Plugins.Events;
+using Chraft.Utilities;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Misc;
 using Chraft.World;
 using Chraft.Utils;
-using Chraft.Properties;
-using Chraft.Interfaces;
-using Chraft.Plugins.Events.Args;
-using System.Collections.Concurrent;
+using Chraft.PluginSystem;
 
 namespace Chraft.Net
 {
-    public partial class Client
+    public partial class Client : IClient
     {
-        internal const int ProtocolVersion = 17;
-        private Socket _Socket;
+        internal const int ProtocolVersion = 29;
+        private readonly Socket _socket;
         public volatile bool Running = true;
-        public PacketHandler PacketHandler { get; private set; }
-        private Timer KeepAliveTimer;
-        private Player _Player = null;
+        internal PacketHandler PacketHandler { get; private set; }
+        private Timer _keepAliveTimer;
+        private Player _player = null;
 
-        public static SocketAsyncEventArgsPool SendSocketEventPool = new SocketAsyncEventArgsPool(10);
-        public static SocketAsyncEventArgsPool RecvSocketEventPool = new SocketAsyncEventArgsPool(10);
-        public static BufferPool RecvBufferPool = new BufferPool("Receive", 2048, 2048);
+        internal static SocketAsyncEventArgsPool SendSocketEventPool = new SocketAsyncEventArgsPool(10);
+        internal static SocketAsyncEventArgsPool RecvSocketEventPool = new SocketAsyncEventArgsPool(10);
+        internal static BufferPool RecvBufferPool = new BufferPool("Receive", 2048, 2048);
 
 
-        private byte[] _RecvBuffer;
-        private SocketAsyncEventArgs _SendSocketEvent;
-        private SocketAsyncEventArgs _RecvSocketEvent;
+        private byte[] _recvBuffer;
+        private SocketAsyncEventArgs _sendSocketEvent;
+        private SocketAsyncEventArgs _recvSocketEvent;
 
-        private ByteQueue _CurrentBuffer;
-        private ByteQueue _ProcessedBuffer;
-        private ByteQueue _FragPackets;
+        private ByteQueue _currentBuffer;
+        private ByteQueue _processedBuffer;
+        private ByteQueue _fragPackets;
 
-        private bool _SendSystemDisposed;
-        private bool _RecvSystemDisposed;
+        private bool _sendSystemDisposed;
+        private bool _recvSystemDisposed;
 
-        private object _DisposeLock = new object();
+        private readonly object _disposeLock = new object();
+
+        private DateTime _nextActivityCheck;
+
+        internal Server Server { get; set; }
+
+        internal int SessionID { get; private set; }
+
+        /// <summary>
+        /// The mixed-case, clean username of the client.
+        /// </summary>
+        public string Username { get; internal set; }
+
+        public string Host { get; set; }
 
         public Player Owner
         {
-            get { return _Player; }
+            get { return _player; }
         }
 
-        public ByteQueue FragPackets
+        internal ByteQueue FragPackets
         {
-            get { return _FragPackets; }
-            set { _FragPackets = value; }
+            get { return _fragPackets; }
+            set { _fragPackets = value; }
         }
 
         /// <summary>
         /// A reference to the server logger.
         /// </summary>
-        public Logger Logger { get { return _Player.Server.Logger; } }
+        internal Logger Logger { get { return Server.Logger; } }
 
         /// <summary>
         /// Instantiates a new Client object.
         /// </summary>
-        /// <param name="server">The Server to associate with the entity.</param>
-        /// <param name="sessionId">The entity ID for the client.</param>
-        /// <param name="tcp">The TCP client to be used for communication.</param>
-        internal Client(Socket socket, Player player)
+        internal Client(int sessionId, Server server, Socket socket)
         {
-            _Socket = socket;
-            _Player = player;
-            _Player.Client = this;
-            _CurrentBuffer = new ByteQueue();
-            _ProcessedBuffer = new ByteQueue();
-            _FragPackets = new ByteQueue();
+            _socket = socket;
+            _currentBuffer = new ByteQueue();
+            _processedBuffer = new ByteQueue();
+            _fragPackets = new ByteQueue();
+            _nextActivityCheck = DateTime.Now + TimeSpan.FromSeconds(10);
+            SessionID = sessionId;
+            Server = server;
+            _chunkSendTimer = new Timer(SendChunks, null, Timeout.Infinite, Timeout.Infinite);
             //PacketHandler = new PacketHandler(Server, socket);
+        }
+
+        public IPlayer GetOwner()
+        {
+            return _player;
+        }
+
+        public IServer GetServer()
+        {
+            return Server;
+        }
+
+        public ILogger GetLogger()
+        {
+            return Logger;
+        }
+
+        public bool CheckUsername(string username)
+        {
+            string usernameToCheck = Regex.Replace(username, Chat.DISALLOWED, "");
+            Logger.Log(LogLevel.Debug, "Username: {0}", usernameToCheck);
+            return usernameToCheck == Username;
         }
 
         private void SetGameMode()
         {
             SendPacket(new NewInvalidStatePacket
             {
-                GameMode = _Player.GameMode,
+                GameMode = _player.GameMode,
                 Reason = NewInvalidStatePacket.NewInvalidReason.ChangeGameMode
             });
         }
 
-        public void Start()
+        internal void Start()
         {
             Running = true;
-            _SendSocketEvent = SendSocketEventPool.Pop();
-            _RecvSocketEvent = RecvSocketEventPool.Pop();
-            _RecvBuffer = RecvBufferPool.AcquireBuffer();
+            _sendSocketEvent = SendSocketEventPool.Pop();
+            _recvSocketEvent = RecvSocketEventPool.Pop();
+            _recvBuffer = RecvBufferPool.AcquireBuffer();
 
-            _RecvSocketEvent.SetBuffer(_RecvBuffer, 0, _RecvBuffer.Length);
-            _RecvSocketEvent.Completed += new EventHandler<SocketAsyncEventArgs>(Recv_Completed);
+            _recvSocketEvent.SetBuffer(_recvBuffer, 0, _recvBuffer.Length);
+            _recvSocketEvent.Completed += new EventHandler<SocketAsyncEventArgs>(Recv_Completed);
 
-            _SendSocketEvent.Completed += new EventHandler<SocketAsyncEventArgs>(Send_Completed);
+            _sendSocketEvent.Completed += new EventHandler<SocketAsyncEventArgs>(Send_Completed);
 
-            new Task(Recv_Start).Start();
+            Task.Factory.StartNew(Recv_Start);
         }
 
         /*internal void AssociateInterface(Interface iface)
@@ -111,15 +164,15 @@ namespace Chraft.Net
 
         private void CloseInterface()
         {
-            if (_Player.CurrentInterface == null)
+            if (_player.CurrentInterface == null)
                 return;
             SendPacket(new CloseWindowPacket
             {
-                WindowId = _Player.CurrentInterface.Handle
+                WindowId = _player.CurrentInterface.Handle
             });
         }
 
-        public int Ping { get; set; }
+        public int Ping { get; internal set; }
         public int LastKeepAliveId;
         public DateTime KeepAliveStart;
         public DateTime LastClientResponse = DateTime.Now;
@@ -134,26 +187,26 @@ namespace Chraft.Net
                     this.Stop();
                     return;
                 }
-                LastKeepAliveId = _Player.Server.Rand.Next();
+                LastKeepAliveId = _player.Server.Rand.Next();
                 KeepAliveStart = DateTime.Now;
                 SendPacket(new KeepAlivePacket() {KeepAliveID = this.LastKeepAliveId});
             }
         }
 
+        internal void CheckAlive()
+        {
+            if(DateTime.Now > _nextActivityCheck)
+                Stop();
+        }
+
         /// <summary>
         /// Stop reading packets from the client, and kill the keep-alive timer.
         /// </summary>
-        public void Stop()
+        internal void Stop()
         {
-            _Player.Ready = false;
             MarkToDispose();
             DisposeRecvSystem();
             DisposeSendSystem();
-            if (KeepAliveTimer != null)
-            {
-                KeepAliveTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                KeepAliveTimer = null;
-            }
         }
 
         /// <summary>
@@ -164,18 +217,24 @@ namespace Chraft.Net
         {
             //Event
             ClientKickedEventArgs e = new ClientKickedEventArgs(this, reason);
-            _Player.Server.PluginManager.CallEvent(Event.PLAYER_KICKED, e);
+            Server.PluginManager.CallEvent(Event.PlayerKicked, e);
             if (e.EventCanceled) return;
             reason = e.Message;
             //End Event
+
+            if(_player != null && _player.LoggedIn)
+                Save();
+
             SendPacket(new DisconnectPacket
             {
                 Reason = reason
             });
         }
 
-        public void Disconnected(object sender, SocketAsyncEventArgs e)
+        internal void Disconnected(object sender, SocketAsyncEventArgs e)
         {
+            if (_player != null && _player.LoggedIn)
+                Save();
             // Just wait a bit since it's possible that we close the socket before the packet reached the client
             Thread.Sleep(200);
             Stop();
@@ -186,43 +245,95 @@ namespace Chraft.Net
         /// </summary>
         public void Dispose()
         {
-            _Player.Server.Logger.Log(Chraft.Logger.LogLevel.Info, "Disposing {0}", _Player.DisplayName);
-            string disconnectMsg = ChatColor.Yellow + _Player.DisplayName + " has left the game.";
-            //Event
-            ClientLeftEventArgs e = new ClientLeftEventArgs(this);
-            _Player.Server.PluginManager.CallEvent(Plugins.Events.Event.PLAYER_LEFT, e);
-            //You cant stop the player from leaving so dont try.
-            disconnectMsg = e.BrodcastMessage;
-            //End Event
-            _Player.Server.Broadcast(disconnectMsg);
-
-            if(_Player.LoggedIn)
-                Save();
-            _Player.LoggedIn = false;
-
-            _Player.Server.RemoveClient(this);
-            _Player.Server.Logger.Log(Chraft.Logger.LogLevel.Info, "Clients online: {0}", _Player.Server.Clients.Count);
-            _Player.Server.RemoveEntity(_Player);
-            foreach (int packedCoords in _Player.LoadedChunks.Keys)
+            if (_player != null)
             {
-                Chunk chunk = _Player.World.GetChunk(UniversalCoords.FromPackedChunk(packedCoords), false, false);
-                if (chunk != null)
-                    chunk.RemoveClient(this);
+                Server.Logger.Log(LogLevel.Info, "Disposing {0}", _player.DisplayName);
+                string disconnectMsg = ChatColor.Yellow + _player.DisplayName + " has left the game.";
+                //Event
+                ClientLeftEventArgs e = new ClientLeftEventArgs(this);
+                Server.PluginManager.CallEvent(Event.PlayerLeft, e);
+                //You cant stop the player from leaving so dont try.
+                disconnectMsg = e.BrodcastMessage;
+                //End Event
+
+                if (_player.LoggedIn)
+                {
+                    _player.Server.BroadcastSync(disconnectMsg, this);
+                    Save();
+                }
+
+                Task.Factory.StartNew(() =>
+                {
+                    foreach (Chunk chunk in _player.LoadedChunks.Values)
+                    {
+                        if (chunk != null)
+                            chunk.RemoveClient(this);
+                    }
+                });
+
+                Server.RemoveAuthenticatedClient(this);
+
+                Server.Logger.Log(LogLevel.Info, "Clients online: {0}", Server.Clients.Count);
+                Server.RemoveEntity(_player, false);
+
+                Client[] nearbyClients = Server.GetNearbyPlayersInternal(_player.World, UniversalCoords.FromAbsWorld(_player.Position)).ToArray();
+
+                foreach (var client in nearbyClients)
+                {
+                    if (client != this)
+                    {
+                        DestroyEntityPacket de = new DestroyEntityPacket {EntityId = _player.EntityId};
+                        de.Write();
+                        byte[] data = de.GetBuffer();
+                        client.Send_Sync(data);
+                    }
+                }
+
+                _player.LoggedIn = false;
+                _player.Ready = false;
+                Running = false;
+
+                if (_keepAliveTimer != null)
+                {
+                    _keepAliveTimer.Dispose();
+                    _keepAliveTimer = null;
+                }
+            }
+            else
+            {
+                Server.Logger.Log(LogLevel.Info, "Disposing {0}", Username);
+                Running = false;
+                Server.RemoveClient(this);
+                Server.Logger.Log(LogLevel.Info, "Clients online: {0}", Server.Clients.Count);
+                Server.FreeConnectionSlot();
             }
 
-            RecvBufferPool.ReleaseBuffer(_RecvBuffer);
-            SendSocketEventPool.Push(_SendSocketEvent);
-            RecvSocketEventPool.Push(_RecvSocketEvent);
+            _chunkSendTimer.Dispose();
+            _chunkSendTimer = null;
 
-            if (_Socket.Connected)
-                _Socket.Close();
+            RecvBufferPool.ReleaseBuffer(_recvBuffer);
+            SendSocketEventPool.Push(_sendSocketEvent);
+            RecvSocketEventPool.Push(_recvSocketEvent);
 
-            GC.Collect();
+            if (_socket.Connected)
+            {
+                try
+                {
+                    _socket.Shutdown(SocketShutdown.Both);
+                }
+                catch(SocketException)
+                {
+                    // Ignore errors in socket shutdown (e.g. if client crashes there is a no connection error when trying to shutdown)
+                }
+            }
+            _socket.Close();
+           
+            //GC.Collect();
         }
 
         public void MarkToDispose()
         {
-            lock (_DisposeLock)
+            lock (_disposeLock)
             {
                 if (Running)
                 {
@@ -232,33 +343,33 @@ namespace Chraft.Net
             }
         }
 
-        public void DisposeSendSystem()
+        internal void DisposeSendSystem()
         {
-            lock(_DisposeLock)
+            lock(_disposeLock)
             {
-                if (!_SendSystemDisposed)
+                if (!_sendSystemDisposed)
                 {
-                    _SendSystemDisposed = true;
-                    if (_RecvSystemDisposed)
+                    _sendSystemDisposed = true;
+                    if (_recvSystemDisposed)
                     {
                         Server.ClientsToDispose.Enqueue(this);
-                        _Player.Server.NetworkSignal.Set();
+                        Server.NetworkSignal.Set();
                     }
                 }
             }
         }
 
-        public void DisposeRecvSystem()
+        internal void DisposeRecvSystem()
         {
-            lock (_DisposeLock)
+            lock (_disposeLock)
             {
-                if (!_RecvSystemDisposed)
+                if (!_recvSystemDisposed)
                 {
-                    _RecvSystemDisposed = true;
-                    if (_SendSystemDisposed)
+                    _recvSystemDisposed = true;
+                    if (_sendSystemDisposed)
                     {
                         Server.ClientsToDispose.Enqueue(this);
-                        _Player.Server.NetworkSignal.Set();
+                        Server.NetworkSignal.Set();
                     }
                 }
             }
@@ -278,127 +389,7 @@ namespace Chraft.Net
 
         private void StartKeepAliveTimer()
         {
-            KeepAliveTimer = new Timer(KeepAliveTimer_Callback, null, 10000, 10000);
-        }
-
-        /// <summary>
-        /// Updates nearby players when Client is hurt.
-        /// </summary>
-        /// <param name="cause"></param>
-        /// <param name="DamageAmount"></param>
-        /// <param name="hitBy">The Client hurting the current Client.</param>
-        /// <param name="args">First argument should always be the damage amount.</param>
-        public void DamageClient(DamageCause cause, double DamageAmount, EntityBase hitBy = null, params object[] args)
-        {
-
-            //event start
-            EntityDamageEventArgs entevent = new EntityDamageEventArgs(_Player, Convert.ToInt16(DamageAmount), null, cause);
-            _Player.Server.PluginManager.CallEvent(Event.ENTITY_DAMAGE, entevent);
-            if (_Player.GameMode == 1) { entevent.EventCanceled = true; }
-            if (entevent.EventCanceled) return;
-            //event end
-
-            switch (cause)
-            {
-                case DamageCause.BlockExplosion:
-                    break;
-                case DamageCause.Contact:
-                    break;
-                case DamageCause.Drowning:
-                    break;
-                case DamageCause.EntityAttack:
-                    if (hitBy != null)
-                    {
-
-                    }
-                    break;
-                case DamageCause.EntityExplosion:
-                    break;
-                case DamageCause.Fall:
-                    if (args.Length > 0)
-                    {
-                        _Player.Health -= Convert.ToInt16(DamageAmount);
-                    }
-                    break;
-                case DamageCause.Fire:
-                    break;
-                case DamageCause.FireBurn:
-                    break;
-                case DamageCause.Lava:
-                    break;
-                case DamageCause.Lightning:
-                    break;
-                case DamageCause.Projectile:
-                    break;
-                case DamageCause.Suffocation:
-                    break;
-                case DamageCause.Void:
-                    break;
-                default:
-                    _Player.Health -= 1;
-                    break;
-
-            }
-
-            SendPacket(new UpdateHealthPacket
-            {
-                Health = _Player.Health,
-                Food = Owner.Food,
-                FoodSaturation = Owner.FoodSaturation,
-            });
-
-            foreach (Client c in _Player.Server.GetNearbyPlayers(_Player.World, new AbsWorldCoords(_Player.Position.X, _Player.Position.Y, _Player.Position.Z)))
-            {
-                if (c == this)
-                    continue;
-
-                c.SendPacket(new AnimationPacket // Hurt Animation
-                {
-                    Animation = 2,
-                    PlayerId = _Player.EntityId
-                });
-
-                c.SendPacket(new EntityStatusPacket // Hurt Action
-                {
-                    EntityId = _Player.EntityId,
-                    EntityStatus = 2
-                });
-            }
-
-            if (_Player.Health == 0)
-                _Player.HandleDeath(hitBy);
-        }
-
-        public string FacingDirection(byte points)
-        {
-
-            byte rotation = (byte)(_Player.Yaw * 256 / 360); // Gives rotation as 0 - 255, 0 being due E.
-
-            if (points == 8)
-            {
-                if (rotation < 17 || rotation > 240)
-                    return "E";
-                if (rotation < 49)
-                    return "SE";
-                if (rotation < 81)
-                    return "S";
-                if (rotation < 113)
-                    return "SW";
-                if (rotation > 208)
-                    return "NE";
-                if (rotation > 176)
-                    return "N";
-                if (rotation > 144)
-                    return "NW";
-                return "W";
-            }
-            if (rotation < 32 || rotation > 224)
-                return "E";
-            if (rotation < 76)
-                return "S";
-            if (rotation > 140)
-                return "N";
-            return "W";
+            _keepAliveTimer = new Timer(KeepAliveTimer_Callback, null, 10000, 10000);
         }
     }
 }

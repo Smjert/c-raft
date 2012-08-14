@@ -1,10 +1,26 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
 using Chraft.Entity;
 using Chraft.Interfaces;
-using Chraft.Plugins.Events.Args;
+using Chraft.PluginSystem;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Coords;
+using Chraft.World.Blocks.Base;
 using Chraft.World.Blocks.Physics;
 
 namespace Chraft.World.Blocks
@@ -19,30 +35,19 @@ namespace Chraft.World.Blocks
             LootTable.Add(new ItemStack((short)Type, 1));
         }
 
-        public override void NotifyDestroy(EntityBase entity, StructBlock sourceBlock, StructBlock targetBlock)
+        protected override void NotifyDestroy(EntityBase entity, StructBlock sourceBlock, StructBlock targetBlock)
         {
             if ((targetBlock.Coords.WorldY - sourceBlock.Coords.WorldY) == 1 &&
                     targetBlock.Coords.WorldX == sourceBlock.Coords.WorldX &&
                     targetBlock.Coords.WorldZ == sourceBlock.Coords.WorldZ)
-            {
                 StartPhysics(targetBlock);
-            }
             base.NotifyDestroy(entity, sourceBlock, targetBlock);
         }
 
-        public override void Place(EntityBase entity, StructBlock block, StructBlock targetBlock, BlockFace face)
+        protected override void UpdateWorld(StructBlock block, bool isDestroyed = false)
         {
-            if (!CanBePlacedOn(entity, block, targetBlock, face))
-                return;
-
-            if (!RaisePlaceEvent(entity, block))
-                return;
-
-            UpdateOnPlace(block);
-
-            RemoveItem(entity);
-
-            if (block.Coords.WorldY > 1)
+            base.UpdateWorld(block, isDestroyed);
+            if (!isDestroyed && block.Coords.WorldY > 1)
                 if (block.World.GetBlockId(block.Coords.WorldX, block.Coords.WorldY - 1, block.Coords.WorldZ) == (byte)BlockData.Blocks.Air)
                     StartPhysics(block);
         }
@@ -50,7 +55,7 @@ namespace Chraft.World.Blocks
         protected void StartPhysics(StructBlock block)
         {
             Remove(block);
-            FallingSand fsBlock = new FallingSand(block.World, new AbsWorldCoords(block.Coords.WorldX + 0.5, block.Coords.WorldY + 0.5, block.Coords.WorldZ + 0.5));
+            FallingSand fsBlock = new FallingSand((WorldManager)block.World, new AbsWorldCoords(block.Coords.WorldX + 0.5, block.Coords.WorldY + 0.5, block.Coords.WorldZ + 0.5));
             fsBlock.Start();
             block.World.PhysicsBlocks.TryAdd(fsBlock.EntityId, fsBlock);
         }

@@ -1,8 +1,25 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.IO;
+using System.Xml.Linq;
 
 namespace Chraft.Interfaces.Recipes
 {
@@ -24,7 +41,7 @@ namespace Chraft.Interfaces.Recipes
 			List<ItemStack> ings = new List<ItemStack>();
 			for (int h = 0; h < ingredients.GetLength(0); h++)
 				for (int w = 0; w < ingredients.GetLength(1); w++)
-					if (!ItemStack.IsVoid(ingredients[h, w]))
+                    if (ingredients[h, w] != null && !ingredients[h, w].IsVoid())
 						ings.Add(ingredients[h, w]);
 			Ingredients2 = ings.ToArray();
 		}
@@ -45,7 +62,7 @@ namespace Chraft.Interfaces.Recipes
 						{
 							ItemStack ing1 = Ingredients3[y - h, x - w];
 							ItemStack ing2 = ingredients[y * s + x];
-                            if (ItemStack.IsVoid(ing1) && ItemStack.IsVoid(ing2))
+                            if (ing1.IsVoid() && ing2.IsVoid())
                                 continue;
                             else if (ing1.Type == ing2.Type && (ing1.Durability < 0 || ing1.Durability == ing2.Durability) && ing2.Count >= ing1.Count)
 								continue;
@@ -125,7 +142,7 @@ namespace Chraft.Interfaces.Recipes
             int result = 0;
             foreach (ItemStack item in ingredients)
             {
-                if (ItemStack.IsVoid(item))
+                if (item.IsVoid())
                     result++;
             }
 
@@ -152,7 +169,7 @@ namespace Chraft.Interfaces.Recipes
                 // Based on assumption about load order: simply getting the next non-void ingredient will match the current recipe ingredient, then subtract the number required.
                 for (int i = indx; i < ingredients.Length; i++)
                 {
-                    if (!ItemStack.IsVoid(ingredients[i]))
+                    if (!ingredients[i].IsVoid())
                     {
                         ingredients[i].Count -= item.Count;
                         indx = i + 1;
@@ -167,13 +184,81 @@ namespace Chraft.Interfaces.Recipes
 			foreach (Recipe r in recipes)
 			{
 				if (r.Matches(ingredients))
-				{
-					Console.WriteLine("Matches recipe: " + r.Result.Type + " " + r.Result.Count);
 					return r;
-				}
 			}
 			return null;
 		}
+
+        public static Recipe[] FromXmlFile(string file)
+        {
+            // Define variables
+            List<Recipe> loadedRecipes = new List<Recipe>();
+            XDocument document;
+
+            // Load the recipes file
+            document = XDocument.Load(file);
+
+            // Get all of the recipe elements
+            var recipes = document.Descendants("Recipes").Descendants("Recipe");
+
+            // Loop through the recipe elements
+            foreach (XElement recipe in recipes)
+            {
+                // Define variables
+                ItemStack result;
+                ItemStack[,] ingredients;
+                bool freeformRecipe = false;
+                int rowCount = 0, row = 0;
+
+                // Determine the resulting item
+                string amount = recipe.Descendants("Amount").First().Value;
+                string id = recipe.Attribute("Id").Value;
+
+                // - Create the stack
+                result = ItemStack.Parse(string.Format("{0}#{1}", id, amount));
+
+                // Determine whether or not this is a free-from recipe
+                string match = recipe.Attribute("Match").Value;
+
+                // - Check the value
+                if (match.ToLower() == "any")
+                    freeformRecipe = true;
+
+                // Load the rows
+                var rows = recipe.Descendants("Rows").Descendants("Row");
+                rowCount = rows.Count<XElement>();
+
+                // Initialize the ingredients array
+                ingredients = new ItemStack[rowCount, 3];
+
+                // Loop through the row elements
+                foreach (XElement r in rows)
+                {
+                    // Define variables
+                    string value = r.Value;
+                    string[] items = value.Split(',');
+
+                    // Loop through the items
+                    for (int i = 0; i < items.Length; i++)
+                    {
+                        // Define variables
+                        string item = items[i];
+
+                        // Add the item stack to the ingredients list
+                        ingredients[row, i] = ItemStack.Parse(item);
+                    }
+
+                    // Increment the row variable
+                    row++;
+                }
+
+                // Add the recipe to the list
+                loadedRecipes.Add(new Recipe(result, ingredients, new ItemStack[3, 3], freeformRecipe));
+            }
+
+            // Return the loaded recipes
+            return loadedRecipes.ToArray();
+        }
 
 		public static Recipe[] FromFile(string file)
 		{

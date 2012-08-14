@@ -1,7 +1,25 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
 using Chraft.World.Blocks;
 
 namespace Chraft.World
@@ -11,9 +29,9 @@ namespace Chraft.World
 		public const int SIZE = 16 * 16 * 128;
 		public delegate void ForEachBlock(int x, int y, int z);
 
-		protected unsafe byte[] Types = new byte[SIZE];
-		protected unsafe byte[] Light = new byte[SIZE];
-		protected unsafe byte[] Data = new byte[SIZE];
+		protected byte[] Types = new byte[SIZE];
+		protected byte[] Light = new byte[SIZE];
+		protected byte[] Data = new byte[SIZE];
 
 		public unsafe byte this[int x, int y, int z]
 		{
@@ -84,14 +102,14 @@ namespace Chraft.World
 				data[Translate(x, y, z)] = value;
 		}
 
-		public byte GetLuminence(int x, int y, int z)
+		public byte GetLuminance(int x, int y, int z)
 		{
-			return BlockHelper.Instance(this[x, y, z]).Luminance;
+            return BlockHelper.Instance.Luminance(this[x, y, z]);
 		}
 
 		public byte GetOpacity(int x, int y, int z)
 		{
-			return BlockHelper.Instance(this[x, y, z]).Opacity;
+            return BlockHelper.Instance.Opacity(this[x, y, z]);
 		}
 
 		public void SetAllBlocks(byte[] data)

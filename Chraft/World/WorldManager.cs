@@ -1,30 +1,62 @@
-﻿using System;
+#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using Chraft.Interfaces.Containers;
 using Chraft.Net;
+using Chraft.Net.Packets;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Args;
+using Chraft.PluginSystem.Entity;
+using Chraft.PluginSystem.Event;
+using Chraft.PluginSystem.Net;
+using Chraft.PluginSystem.Server;
+using Chraft.PluginSystem.World;
+using Chraft.PluginSystem.World.Blocks;
 using Chraft.Plugins.Events;
-using Chraft.Properties;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Collision;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Math;
+using Chraft.Utilities.Config;
 using System.IO;
 using Chraft.Entity;
 using Chraft.World.Blocks;
+using Chraft.World.Blocks.Base;
 using Chraft.World.Blocks.Physics;
 using Chraft.World.Weather;
-using Chraft.Plugins.Events.Args;
 using System.Threading.Tasks;
 using Chraft.Utils;
 using System.Collections.Generic;
 using Chraft.WorldGen;
 using System.Collections.Concurrent;
+using java.util;
+using Timer = System.Threading.Timer;
 
 namespace Chraft.World
 {
-    public partial class WorldManager : IDisposable
+    public partial class WorldManager : IDisposable, IWorldManager
     {
-        private Timer GlobalTick;
-        private IChunkGenerator Generator;
+        private IChunkGenerator _generator;
         public object ChunkGenLock = new object();
-        private ChunkProvider _ChunkProvider;
+        private ChunkProvider _chunkProvider;
 
         public sbyte Dimension { get { return 0; } }
         public long Seed { get; private set; }
@@ -32,46 +64,53 @@ namespace Chraft.World
         public bool Running { get; private set; }
         public Server Server { get; private set; }
         public Logger Logger { get { return Server.Logger; } }
-        public string Name { get { return Settings.Default.DefaultWorldName; } }
-        public string Folder { get { return Settings.Default.WorldsFolder + Path.DirectorySeparatorChar + Name; } }
+        public string Name { get { return ChraftConfig.DefaultWorldName; } }
+        public string Folder { get { return ChraftConfig.WorldsFolder + Path.DirectorySeparatorChar + Name; } }
+        public string SignsFolder { get { return Folder + Path.DirectorySeparatorChar + "Signs"; } }
+
         public WeatherManager Weather { get; private set; }
 
-        private readonly ChunkSet _Chunks;
-        private ChunkSet Chunks { get { return _Chunks; } }
+        private readonly ChunkSet _chunks;
+        private ChunkSet Chunks { get { return _chunks; } }
 
-        public ConcurrentQueue<ChunkLightUpdate> ChunksToRecalculate;
+        public ConcurrentQueue<ChunkLightUpdate> InitialChunkLightToRecalculate;
+        public ConcurrentQueue<ChunkLightUpdate> ChunkLightToRecalculate;
 
-        public ConcurrentDictionary<int, BlockBasePhysics> PhysicsBlocks;
-        private Task _PhysicsSimulationTask;
+        internal ConcurrentDictionary<int, BaseFallingPhysics> PhysicsBlocks;
+        private Task _physicsSimulationTask;
+        private Task _entityUpdateTask;
+        private Task _mobSpawnerTask;
 
-        public ConcurrentQueue<ChunkBase> ChunksToSave;
+        public ConcurrentQueue<Chunk> ChunksToSave;
+        public ConcurrentQueue<Chunk> ChunksToSavePostponed;
 
-        private CancellationTokenSource _SaveToken;
-        public bool NeedsFullSave;
-        public bool FullSaving;
+        public ConcurrentDictionary<int, ChunkEntry> PendingChunks = new ConcurrentDictionary<int, ChunkEntry>();
 
-        private Task _GrowStuffTask;
-        private Task _CollectTask;
-        private Task _SaveTask;
-        private Task _Profile;
+        private CancellationTokenSource _saveToken;
 
-        private int _Time;
-        private Chunk[] _ChunksCache;
+        private Task _growStuffTask;
+        private Task _collectTask;
+        private Task _chunkSaveTask;
+
+        private Task _profile;
+
+        private int _time;
+        private Chunk[] _chunksCache;
         /// <summary>
         /// In units of 0.05 seconds (between 0 and 23999)
         /// </summary>
         public int Time
         {
             get { 
-                int time = _Time;
+                int time = _time;
                 
                 return time; }
             set {
-                _Time = value;             
+                _time = value;             
                 }
         }
 
-        private int _WorldTicks = 0;
+        private int _worldTicks;
         
         /// <summary>
         /// The current World Tick independant of the world's current Time (1 tick = 0.05 secs with a max value of 4,294,967,295 gives approx. 6.9 years of ticks)
@@ -80,38 +119,64 @@ namespace Chraft.World
         {
             get
             {
-                return _WorldTicks;
+                return _worldTicks;
             }
         }
 
-        public Chunk GetChunk(UniversalCoords coords, bool create, bool load, bool recalculate = true)
+        public IServer GetServer()
+        {
+            return Server;
+        }
+
+        public IChunk GetChunk(UniversalCoords coords, bool create = false, bool load = false)
         {
             Chunk chunk;
             if ((chunk = Chunks[coords]) != null)
                 return chunk;
 
-            return load ? LoadChunk(coords, create, recalculate) : null;
+            return load ? LoadChunk(coords, create) : null;
         }
 
-        public Chunk GetChunkFromChunk(int chunkX, int chunkZ, bool create, bool load, bool recalculate = true)
+        public IChunk GetChunkFromChunkSync(int chunkX, int chunkZ, bool create = false, bool load = false)
         {
             Chunk chunk;
             if ((chunk = Chunks[chunkX, chunkZ]) != null)
                 return chunk;
 
-            return load ? LoadChunk(UniversalCoords.FromChunk(chunkX, chunkZ), create, recalculate) : null;
+            return load ? LoadChunk(UniversalCoords.FromChunk(chunkX, chunkZ), create) : null;
         }
 
-        public Chunk GetChunkFromWorld(int worldX, int worldZ, bool create, bool load, bool recalculate = true)
+        public IChunk GetChunkFromChunkAsync(int chunkX, int chunkZ, IClient client, bool create = false, bool load = false)
+        {
+            Chunk chunk;
+            if ((chunk = Chunks[chunkX, chunkZ]) != null)
+                return chunk;
+
+            return load ? LoadChunk(UniversalCoords.FromChunk(chunkX, chunkZ), create, client as Client, false) : null;
+        }
+
+        public IChunk GetChunkFromWorld(int worldX, int worldZ, bool create = false, bool load = false)
         {
             Chunk chunk;
             if ((chunk = Chunks[worldX >> 4, worldZ >> 4]) != null)
                 return chunk;
 
-            return load ? LoadChunk(UniversalCoords.FromWorld(worldX, 0, worldZ), create, recalculate) : null;
+            return load ? LoadChunk(UniversalCoords.FromWorld(worldX, 0, worldZ), create) : null;
+        }
+
+        public IChunk GetChunkFromAbs(double absX, double absZ, bool create = false, bool load = false)
+        {
+            int worldX = (int) Math.Floor(absX);
+            int worldZ = (int)Math.Floor(absZ);
+
+            Chunk chunk;
+            if ((chunk = Chunks[worldX >> 4, worldZ >> 4]) != null)
+                return chunk;
+
+            return load ? LoadChunk(UniversalCoords.FromWorld(worldX, 0, worldZ), create) : null;
         }
         
-        public IEnumerable<EntityBase> GetEntitiesWithinBoundingBoxExcludingEntity(EntityBase entity, BoundingBox boundingBox)
+        public IEnumerable<IEntityBase> GetEntitiesWithinBoundingBoxExcludingEntity(IEntityBase entity, BoundingBox boundingBox)
         {
             return (from e in Server.GetEntitiesWithinBoundingBox(boundingBox)
                    where e != entity
@@ -122,24 +187,31 @@ namespace Chraft.World
         {
             List<BoundingBox > collidingBoundingBoxes = new List<BoundingBox>();
 
-            UniversalCoords minimumBlockXYZ = UniversalCoords.FromWorld((int)Math.Floor(boundingBox.Minimum.X), (int)Math.Floor(boundingBox.Minimum.Y), (int)Math.Floor(boundingBox.Minimum.Z));
-            UniversalCoords maximumBlockXYZ = UniversalCoords.FromWorld((int)Math.Floor(boundingBox.Maximum.X + 1.0D), (int)Math.Floor(boundingBox.Maximum.Y + 1.0D), (int)Math.Floor(boundingBox.Maximum.Z + 1.0D));
+            UniversalCoords minimumBlockXYZ = UniversalCoords.FromAbsWorld(boundingBox.Minimum.X, boundingBox.Minimum.Y, boundingBox.Minimum.Z);
+            UniversalCoords maximumBlockXYZ = UniversalCoords.FromAbsWorld(boundingBox.Maximum.X + 1.0D, boundingBox.Maximum.Y + 1.0D, boundingBox.Maximum.Z + 1.0D);
 
             for (int x = minimumBlockXYZ.WorldX; x < maximumBlockXYZ.WorldX; x++)
             {
                 for (int z = minimumBlockXYZ.WorldZ; z < maximumBlockXYZ.WorldZ; z++)
                 {
+                    Chunk chunk = GetChunkFromWorld(x, z) as Chunk;
+
+                    if (chunk == null)
+                        continue;
+
                     for (int y = minimumBlockXYZ.WorldY - 1; y < maximumBlockXYZ.WorldY; y++)
                     {
-                        byte block = this.GetBlockId(x, y, z);
-                        // TODO: this needs to move into block logic
-                        BoundingBox blockBox = new BoundingBox(
-                            new Vector3(x, y, z),
-                            new Vector3(x + 1, y + 1, z + 1)
-                        );
-                        if (blockBox.IntersectsWith(boundingBox))
+                        StructBlock block = (StructBlock)chunk.GetBlock(UniversalCoords.FromWorld(x, y, z));
+
+                        BlockBase blockInstance = BlockHelper.Instance.CreateBlockInstance(block.Type);
+                        
+                        if (blockInstance != null && blockInstance.IsCollidable)
                         {
-                            collidingBoundingBoxes.Add(blockBox);
+                            BoundingBox blockBox = blockInstance.GetCollisionBoundingBox(block);
+                            if (blockBox.IntersectsWith(boundingBox))
+                            {
+                                collidingBoundingBoxes.Add(blockBox);
+                            }
                         }
                     }
                 }
@@ -150,7 +222,7 @@ namespace Chraft.World
                 collidingBoundingBoxes.Add(e.BoundingBox);
                 
                 // TODO: determine if overridable collision boxes between two entities is necessary
-                BoundingBox? collisionBox = entity.GetCollisionBox(e);
+                BoundingBox? collisionBox = entity.GetCollisionBox(e as EntityBase);
                 if (collisionBox != null && collisionBox.Value != e.BoundingBox && collisionBox.Value.IntersectsWith(boundingBox))
                 {
                     collidingBoundingBoxes.Add(collisionBox.Value);
@@ -159,33 +231,50 @@ namespace Chraft.World
             
             return collidingBoundingBoxes.ToArray();
         }
-
+        double[] _lightBrightnessTable = new double[16];
         public WorldManager(Server server)
         {          
-            _Chunks = new ChunkSet();
+            _chunks = new ChunkSet();
             Server = server;
-            ChunksToRecalculate = new ConcurrentQueue<ChunkLightUpdate>();
-            ChunksToSave = new ConcurrentQueue<ChunkBase>();
+            InitialChunkLightToRecalculate = new ConcurrentQueue<ChunkLightUpdate>();
+            ChunkLightToRecalculate = new ConcurrentQueue<ChunkLightUpdate>();
+            ChunksToSave = new ConcurrentQueue<Chunk>();
+            ChunksToSavePostponed = new ConcurrentQueue<Chunk>();
             Load();
+
+            // Create the light brightness table
+            double d = 0.0;
+            for(int i = 0; i < 16; i++)
+            {
+                double d1 = 1.0 - i / 15.0;
+                _lightBrightnessTable[i] = ((1.0 - d1) / (d1 * 3.0 + 1.0)) * (1.0 - d) + d;
+            }
         }
 
-        public bool Load()
+        internal bool Load()
         {
             EnsureDirectory();
 
             //Event
             WorldLoadEventArgs e = new WorldLoadEventArgs(this);
-            Server.PluginManager.CallEvent(Event.WORLD_LOAD, e);
+            Server.PluginManager.CallEvent(Event.WorldLoad, e);
             if (e.EventCanceled) return false;
             //End Event
 
-            _ChunkProvider = new ChunkProvider(this);
-            Generator = _ChunkProvider.GetNewGenerator(GeneratorType.Custom, GetSeed());
-            PhysicsBlocks = new ConcurrentDictionary<int, BlockBasePhysics>();
+            _chunkProvider = new ChunkProvider(this);
+            _generator = _chunkProvider.GetNewGenerator("Default", GetSeed());
+            PhysicsBlocks = new ConcurrentDictionary<int, BaseFallingPhysics>();
+
+            if (_generator == null)
+            {
+                Logger.Log(LogLevel.Error,
+                           "No ChunkGenerator found in the Plugins folder! Add the default one from CustomGenerator project and then restart the server.");
+                return false;
+            }
 
             InitializeSpawn();
-            InitializeThreads();
             InitializeWeather();
+            Running = true;
             return true;
         }
         
@@ -196,65 +285,242 @@ namespace Chraft.World
 
         public int GetHeight(UniversalCoords coords)
         {
-            return GetChunk(coords, false, true).HeightMap[coords.BlockX, coords.BlockZ];
+            Chunk chunk = GetChunk(coords) as Chunk;
+            if (chunk == null)
+                return -1;
+
+            return chunk.HeightMap[coords.BlockX, coords.BlockZ];
         }
 
         public int GetHeight(int x, int z)
         {
-            return GetChunkFromWorld(x, z, false, true).HeightMap[x & 0xf, z & 0xf];
+            Chunk chunk = GetChunkFromWorld(x, z) as Chunk;
+
+            if(chunk == null)
+                return -1;
+            return chunk.HeightMap[x & 0xf, z & 0xf];
         }
 
-        public void AddChunk(Chunk c)
+        public void AddChunk(IChunk iChunk)
         {
+            Chunk c = (Chunk) iChunk;
             c.CreationDate = DateTime.Now;
             Chunks.Add(c);
         }
 
-        private Chunk LoadChunk(UniversalCoords coords, bool create, bool recalculate)
+        public IChunk CreateChunk(UniversalCoords coords)
         {
-            lock (ChunkGenLock)
+            return new Chunk(this, coords);
+        }
+
+        public ConcurrentDictionary<ChunkEntry, ChunkEntry> TempPendingChunks = new ConcurrentDictionary<ChunkEntry, ChunkEntry>(); 
+      
+        private Chunk LoadChunk(UniversalCoords coords, bool create, Client client = null, bool sync = true)
+        {
+            ChunkEntry newEntry = new ChunkEntry();
+            ChunkEntry entry;
+            ChunkEntry removedEntry;
+
+            entry = PendingChunks.GetOrAdd(coords.ChunkPackedCoords, newEntry);
+            int state = Interlocked.CompareExchange(ref entry.State, ChunkEntry.InProgress, ChunkEntry.NotInitialized);
+            Chunk chunk;
+            
+            if (state == ChunkEntry.NotInitialized)
             {
-                Chunk chunk = new Chunk(this, coords);
-                if (chunk.Load())
-                    AddChunk(chunk);
+                int threads;
                 
+                Interlocked.Increment(ref entry.ThreadsWaiting);
+                // The entry could have been just readded but the chunk is already initialized
+                if ((chunk = Chunks[coords]) != null)
+                {
+                    threads = Interlocked.Decrement(ref entry.ThreadsWaiting);
+                    if (threads == 0)
+                        PendingChunks.TryRemove(coords.ChunkPackedCoords, out removedEntry);
+                    
+                    entry.ChunkRequested = chunk;
+                    entry.State = ChunkEntry.Initialized;
+
+                    NotifyChunkToClients(entry);
+
+                    entry.ChunkLock.Set();
+
+                    return chunk;
+
+                }
+
+
+                if ((chunk = Chunk.Load(coords, this)) != null)
+                    AddChunk(chunk);
                 else if (create)
-                    chunk = Generator.ProvideChunk(coords.ChunkX, coords.ChunkZ, chunk, recalculate);
-                else
-                    chunk = null;
+                {
+                    chunk = new Chunk(this, coords);
+                    _generator.GenerateChunk(chunk, coords.ChunkX, coords.ChunkZ, false);
+                }
+
+                if(chunk == null)
+                {
+                    threads = Interlocked.Decrement(ref entry.ThreadsWaiting);
+
+                    if (threads == 0)
+                        PendingChunks.TryRemove(coords.ChunkPackedCoords, out removedEntry);
+
+                    entry.ChunkLock.Set();
+
+                    return chunk;
+                }
+
+                entry.ChunkRequested = chunk;
+                entry.State = ChunkEntry.Initialized;           
+
+                threads = Interlocked.Decrement(ref entry.ThreadsWaiting);
+
+                if (threads == 0)
+                    PendingChunks.TryRemove(coords.ChunkPackedCoords, out removedEntry);
+
+                NotifyChunkToClients(entry);
+                entry.ChunkLock.Set();
+
+                if (chunk != null)
+                {
+                    chunk.InitGrowableCache();
+                    ContainerFactory.LoadContainersFromDisk(chunk);
+                }
 
                 return chunk;
             }
+           
+            if (state == ChunkEntry.InProgress)
+            {
+                Interlocked.Increment(ref entry.ThreadsWaiting);
+
+                if (!sync)
+                    entry.Requests.Enqueue(new ClientRequest { ClientRequesting = client });
+                else
+                    entry.ChunkLock.WaitOne();
+                
+
+                int threads = Interlocked.Decrement(ref entry.ThreadsWaiting);
+                if (threads == 0)
+                    PendingChunks.TryRemove(coords.ChunkPackedCoords, out removedEntry);
+
+                if(!sync)
+                {
+                    if (entry.State == ChunkEntry.Initialized)
+                        NotifyChunkToClients(entry);
+
+                    return null;
+                }
+
+                if (entry.State == ChunkEntry.Initialized)
+                    chunk = Chunks[coords];
+                else
+                    return null;
+
+                Debug.Assert(chunk != null, "RETURNING NULL CHUNK");
+                return chunk;
+            }
+
+            chunk = Chunks[coords];
+
+            Debug.Assert(chunk != null, "RETURNING NULL CHUNK");
+            Debug.Assert(!PendingChunks.TryGetValue(coords.ChunkPackedCoords, out entry), "ENTRY INITIALIZED AND STILL LISTED");
+            
+            return chunk;            
         }
 
-        private void InitializeThreads()
+        private void NotifyChunkToClients(ChunkEntry entry)
         {
-            Running = true;
-            GlobalTick = new Timer(GlobalTickProc, null, 50, 50);
-            EntityMoverStart();
+            int notifyState = Interlocked.CompareExchange(ref entry.NotifyStatus, ChunkEntry.Notified,
+                                                          ChunkEntry.NotNotified);
+
+            if (notifyState == ChunkEntry.Notified || entry.Requests.IsEmpty)
+                return;
+
+            Task.Factory.StartNew(() =>
+            {
+                Parallel.For(0, entry.Requests.Count, (i) =>
+                {
+                    ClientRequest req;
+
+                    if (!entry.Requests.TryDequeue(out req))
+                        return;
+
+                    if (entry.ChunkRequested.LightToRecalculate)
+                        entry.ChunkRequested.RecalculateSky();
+
+                    req.ClientRequesting.Owner.LoadedChunks.TryUpdate(entry.ChunkRequested.Coords.ChunkPackedCoords,
+                                                                      entry.ChunkRequested, null);
+                    entry.ChunkRequested.AddClient(req.ClientRequesting);
+                    req.ClientRequesting.SendPreChunk(entry.ChunkRequested.Coords.ChunkX, entry.ChunkRequested.Coords.ChunkZ, true, false);
+                    req.ClientRequesting.SendChunk(entry.ChunkRequested, false);
+                });
+            });
         }
 
         private void InitializeSpawn()
         {
-            Spawn = UniversalCoords.FromWorld(Settings.Default.SpawnX, Settings.Default.SpawnY, Settings.Default.SpawnZ);
-            for (int i = 127; i > 0; i--)
+            Logger.LogOnOneLine(LogLevel.Info, "Initializing spawn area...", true);
+            Spawn = UniversalCoords.FromWorld(ChraftConfig.SpawnX, ChraftConfig.SpawnY, ChraftConfig.SpawnZ);
+
+            Queue<Chunk> toRecalculate = new Queue<Chunk>();           
+            Chunk chunk = GetChunkFromWorld(Spawn.WorldX, Spawn.WorldZ, true, true) as Chunk;
+            chunk.Persistent = true;
+            toRecalculate.Enqueue(chunk);
+
+            Spawn = UniversalCoords.FromWorld(Spawn.WorldX, chunk.HeightMap[Spawn.WorldX, Spawn.WorldZ] + 4, Spawn.WorldZ);
+
+            int chunkX = Spawn.ChunkX;
+            int chunkZ = Spawn.ChunkZ;
+
+            
+            for(int x = chunkX - 4; x < chunkX + 4; ++x)
             {
-                if (GetBlockOrLoad(Spawn.WorldX, i, Spawn.WorldZ) != 0)
+                for(int z = chunkZ - 4; z < chunkZ + 4; ++z)
                 {
-                    Spawn = UniversalCoords.FromWorld(Spawn.WorldX, i + 4, Spawn.WorldZ);
-                    break;
+                    if(x == chunkX && z == chunkZ)
+                        continue;
+
+                    chunk = GetChunkFromChunkSync(x, z, true, true) as Chunk;
+                    chunk.Persistent = true;
+                    toRecalculate.Enqueue(chunk);
                 }
             }
+#if PROFILE
+            Stopwatch watch = new Stopwatch();
+#endif
+            while(toRecalculate.Count > 0)
+            {
+                chunk = toRecalculate.Dequeue();
+
+                if (chunk.LightToRecalculate)
+#if PROFILE
+                {
+                    watch.Reset();
+                    watch.Start();
+#endif
+                    chunk.RecalculateHeight();
+                    chunk.RecalculateSky();
+#if PROFILE
+                    watch.Stop();
+                    Console.WriteLine("Chunk {0} - {1} skylight recalc: {2} ms", chunk.Coords.ChunkX, chunk.Coords.ChunkZ, watch.ElapsedMilliseconds);
+                }
+#endif
+
+                AddChunk(chunk);
+            }
+
+            Logger.LogOnOneLine(LogLevel.Info, " Done\n", false);
         }
 
         private void CollectProc()
         {
-            Chunk[] chunks = GetChunks();
+            CheckAliveClients();
+            IChunk[] chunks = GetChunks();
             foreach (Chunk c in chunks)
             {
                 if (c.Persistent)
                     continue;
-                if (c.GetClients().Length > 0 || (DateTime.Now - c.CreationDate) < TimeSpan.FromSeconds(10.0))
+                if (c.GetClients().Length > 0 || (DateTime.Now - c.CreationDate) < TimeSpan.FromSeconds(20.0))
                     continue;
 
                 c.Save();
@@ -262,16 +528,10 @@ namespace Chraft.World
             }
         }
 
-        private void FullSave()
+        private void CheckAliveClients()
         {
-            // Wait until the task has been canceled
-            _SaveTask.Wait();
-
-            int count = ChunksToSave.Count;
-            _SaveTask = new Task(() => SaveProc(count, CancellationToken.None));
-            _SaveTask.Start();
-            NeedsFullSave = false;
-            FullSaving = false;
+            Client[] clients = Server.GetClients() as Client[];
+            Parallel.ForEach(clients, c => c.CheckAlive());
         }
 
         private void SaveProc(int chunkToSave, CancellationToken token)
@@ -284,9 +544,10 @@ namespace Chraft.World
             if (count > chunkToSave)
                 count = chunkToSave;
 
+            chunkToSave -= count;
             for (int i = 0; i < count && Running && !token.IsCancellationRequested; ++i)
             {
-                ChunkBase chunk;
+                Chunk chunk;
                 ChunksToSave.TryDequeue(out chunk);
 
                 if (chunk == null)
@@ -296,100 +557,142 @@ namespace Chraft.World
                  * we don't know which signaled changes will be saved during the save */
                 Interlocked.Exchange(ref chunk.ChangesToSave, 0);
 
-                chunk.Save();
-                
+                chunk.Save();               
+            }
+
+            count = ChunksToSavePostponed.Count;
+
+            if (count > chunkToSave)
+                count = chunkToSave;
+
+            for(int i = 0; i < count && Running && !token.IsCancellationRequested; ++i)
+            {
+                Chunk chunk;
+                ChunksToSavePostponed.TryDequeue(out chunk);
+
+                if (chunk == null)
+                    continue;
+
+
+                if (chunk.ChangesToSave > 0 && chunk.EnqueuedForSaving > chunk.LastSaveTime)
+                {
+                    if ((DateTime.Now - chunk.LastSaveTime) > Chunk.SaveSpan)
+                    {
+                        ChunksToSavePostponed.Enqueue(chunk);
+                        continue;
+                    }
+                    /* Better to "signal" that the chunk can be queued again before saving, 
+                     * we don't know which signaled changes will be saved during the save */
+                    Interlocked.Exchange(ref chunk.ChangesToSave, 0);
+
+                    chunk.Save();
+                }
             }
         }
 
         private void EnsureDirectory()
         {
-            if (!Directory.Exists(Settings.Default.WorldsFolder))
-                Directory.CreateDirectory(Settings.Default.WorldsFolder);
+            if (!Directory.Exists(ChraftConfig.WorldsFolder))
+                Directory.CreateDirectory(ChraftConfig.WorldsFolder);
             if (!Directory.Exists(Folder))
                 Directory.CreateDirectory(Folder);
         }
 
-        public static int ligthUpdateCounter = 0;
-
-        private void GlobalTickProc(object state)
+        internal void StartSaveProc(int chunksToSave)
         {
-            // Increment the world tick count (low-lock sync via volatile - safe because this is an atomic operation)
-            Interlocked.Increment(ref _WorldTicks);
+            if (WorldTicks % 20 == 0 && !Server.NeedsFullSave && !Server.FullSaving && (!ChunksToSave.IsEmpty || !ChunksToSavePostponed.IsEmpty))
+            {
+                if (_chunkSaveTask == null || _chunkSaveTask.IsCompleted)
+                {
+                    _saveToken = new CancellationTokenSource();
+                    var token = _saveToken.Token;
+                    _chunkSaveTask = Task.Factory.StartNew(() => SaveProc(chunksToSave, token), token);
+                }
+            }
+        }
 
-            int time;
-            time = Interlocked.Increment(ref _Time);
+        public bool IsSaving()
+        {
+            return _chunkSaveTask != null && _chunkSaveTask.IsCompleted;
+        }
+
+        internal void StopSave()
+        {
+            _saveToken.Cancel();
+            if (!_chunkSaveTask.IsCompleted)
+                _chunkSaveTask.Wait();
+        }
+
+        internal void WorldTick()
+        {
+            // Increment the world tick count
+            Interlocked.Increment(ref _worldTicks);
+
+            int time = Interlocked.Increment(ref _time);
 
             if (time == 24000)
             {	// A day has passed.
                 // MUST interface directly with _Time to bypass the write lock, which we hold.
-                _Time = time = 0;
+                _time = 0;
             }
 
             // Using this.WorldTick here as it is independant of this.Time. "this.Time" can be changed outside of the WorldManager.
             if (WorldTicks % 10 == 0)
             {
                 // Triggered once every half second
-                Task pulse = new Task(Server.DoPulse);
-                pulse.Start();
-            }
-
-            if (NeedsFullSave)
-            {
-                FullSaving = true;
-                if(_SaveTask != null && !_SaveTask.IsCompleted)
-                    _SaveToken.Cancel();
-
-                Task.Factory.StartNew(FullSave);
-            }
-            else if(WorldTicks % 20 == 0 && !FullSaving && ChunksToSave.Count > 0)
-            {
-                if(_SaveTask == null || _SaveTask.IsCompleted)
-                {
-                    _SaveToken = new CancellationTokenSource();
-                    var token = _SaveToken.Token;
-                    _SaveTask = new Task(() => SaveProc(20, token), token);
-                    _SaveTask.Start();
-                }
+                Task.Factory.StartNew(Server.DoPulse);
             }
            
             // Every 5 seconds
             if(WorldTicks % 100 == 0)
             {
-                if(_CollectTask == null || _CollectTask.IsCompleted)
+                if(_collectTask == null || _collectTask.IsCompleted)
                 {
-                    _CollectTask = new Task(CollectProc);
-                    _CollectTask.Start();
+                    _collectTask = Task.Factory.StartNew(CollectProc);
                 }
             }
 
             // Every 10 seconds
             if (WorldTicks % 200 == 0)
             {
-                if (_GrowStuffTask == null || _GrowStuffTask.IsCompleted)
+                if (_growStuffTask == null || _growStuffTask.IsCompleted)
                 {
-                    _GrowStuffTask = new Task(GrowProc);
-                    _GrowStuffTask.Start();
+                    _growStuffTask = Task.Factory.StartNew(GrowProc);
                 }
             }
-
-            if (_PhysicsSimulationTask == null || _PhysicsSimulationTask.IsCompleted)
+   
+            // Every Tick (50ms)
+            if (_physicsSimulationTask == null || _physicsSimulationTask.IsCompleted)
             {
-                _PhysicsSimulationTask = new Task(PhysicsProc);
-                _PhysicsSimulationTask.Start();
+                _physicsSimulationTask = Task.Factory.StartNew(PhysicsProc);
+            }
+
+            if (_entityUpdateTask == null || _entityUpdateTask.IsCompleted)
+            {
+                _entityUpdateTask = Task.Factory.StartNew(EntityProc);
+            }
+
+            // Every 2 Ticks (100ms)
+            if (WorldTicks % 2 == 0)
+            {
+                if (_mobSpawnerTask == null || _mobSpawnerTask.IsCompleted)
+                {
+                    _mobSpawnerTask = Task.Factory.StartNew(MobSpawnerProc);
+                }
             }
 
 #if PROFILE
             // Must wait at least one second between calls to perf counter
             if (WorldTicks % 20 == 0)
             {
-                if(_Profile == null || _Profile.IsCompleted)
+                if(_profile == null || _profile.IsCompleted)
                 {
-                   _Profile = new Task(Profile);
-                   _Profile.Start();
+                    _profile = Task.Factory.StartNew(Profile);
                 }
             }
 #endif
         }
+        
 #if PROFILE
         private void Profile()
         {
@@ -403,60 +706,23 @@ namespace Chraft.World
         }
 #endif
 
-        public Chunk GetChunkFromPosition(int x, int z)
-        {
-            return Chunks[x, z];
-        }
-
-        public byte this[int x, int y, int z]
-        {
-            get
-            {
-                Chunk WorkChunk = GetChunkFromPosition(x, z);
-                return (WorkChunk[x & 0xf, y, z & 0xf]);
-            }
-            set
-            {
-                Chunk WorkChunk = GetChunkFromPosition(x, z);
-                WorkChunk[x & 0xf, y, z & 0xf] = value;
-            }
-        }
-
         public void Dispose()
         {
             this.Running = false;
-            this.GlobalTick.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
-        public byte GetBlockOrLoad(int x, int y, int z)
+        /*public byte GetBlockOrLoad(int x, int y, int z)
         {
             return GetChunkFromWorld(x, z, true, true)[x & 0xf, y, z & 0xf];
-        }
+        }*/
 
-        public Chunk[] GetChunks()
+        public IChunk[] GetChunks()
         {
             int changes = Interlocked.Exchange(ref Chunks.Changes, 0);
-            if(_ChunksCache == null || changes > 0)
-                _ChunksCache = Chunks.Values.ToArray();
+            if(_chunksCache == null || changes > 0)
+                _chunksCache = Chunks.Values.ToArray();
 
-            return _ChunksCache;
-        }
-
-        private void GrowStart()
-        {
-            Thread thread = new Thread(GrowThread);
-            thread.IsBackground = true;
-            thread.Priority = ThreadPriority.BelowNormal;
-            thread.Start();
-        }
-
-        private void GrowThread()
-        {
-            while (Running)
-            {
-                Thread.Sleep(1000);
-                GrowProc();
-            }
+            return _chunksCache;
         }
 
         private void GrowProc()
@@ -474,252 +740,443 @@ namespace Chraft.World
                 physicsBlock.Value.Simulate();
             }
         }
-
-        private void EntityMoverStart()
+  
+        private void EntityProc()
         {
-            Thread thread = new Thread(MovementThread);
-            thread.IsBackground = true;
-            thread.Priority = ThreadPriority.BelowNormal;
-            thread.Start();
-        }
-
-        private void MovementThread()
-        {
-            while (Running)
+            EntityBase[] entities = Server.GetEntities() as EntityBase[];
+            Parallel.ForEach(entities.Where((entity) => entity.World == this), (e) =>
             {
-                Thread.Sleep(200);
-                MovProc();
-            }
-        }
-
-        private void MovProc()
-        {
-            Parallel.ForEach(Server.GetEntities().Where((entity) => entity.World == this), (e) =>
-            {
-                e.TimeInWorld++;
-
-                if (e is Mob)
-                {
-                    Mob m = (Mob)e;
-
-                    m.Update();
-                }
-                else if (e is ItemEntity)
-                {
-                    byte? uBlock = GetBlockOrNull((int)e.Position.X, (int)(e.Position.Y - 0.4), (int)e.Position.Z);
-
-                    if (uBlock != null) // Ignore if item is in an unloaded chunk.
-                    {
-                        switch ((BlockData.Blocks)uBlock)
-                        {
-                            case BlockData.Blocks.Air:
-                            case BlockData.Blocks.Brown_Mushroom:
-                            case BlockData.Blocks.Crops:
-                            case BlockData.Blocks.Ladder:
-                            case BlockData.Blocks.Lever:
-                            case BlockData.Blocks.Portal:
-                            case BlockData.Blocks.Rails:
-                            case BlockData.Blocks.Red_Mushroom:
-                            case BlockData.Blocks.Red_Rose:
-                            case BlockData.Blocks.Redstone_Torch:
-                            case BlockData.Blocks.Redstone_Torch_On:
-                            case BlockData.Blocks.Redstone_Wire:
-                            case BlockData.Blocks.Reed:
-                            case BlockData.Blocks.Sapling:
-                            case BlockData.Blocks.Still_Water:
-                            case BlockData.Blocks.Stone_Button:
-                            case BlockData.Blocks.Torch:
-                            case BlockData.Blocks.Water:
-                            case BlockData.Blocks.Yellow_Flower:
-                                e.Position = new AbsWorldCoords(e.Position.X, e.Position.Y - 0.4, e.Position.Z);
-                                break;
-
-                            case BlockData.Blocks.Fire:
-                            case BlockData.Blocks.Lava:
-                            case BlockData.Blocks.Still_Lava:
-                                Server.RemoveEntity(e);
-                                break;
-                        }
-                    }
-
-                    // TOOD: Water flow movement.
-                }
+                e.Update();
             });
         }
-
-        public void SpawnAnimal(UniversalCoords coords)
+        
+        private void MobSpawnerProc()
         {
-            MobType type = MobType.Giant;
-            switch (Server.Rand.Next(4))
-            {
-                case 0: type = MobType.Cow; break;
-                case 1: type = MobType.Hen; break;
-                case 2: type = MobType.Pig; break;
-                case 3: type = MobType.Sheep; break;
-            }
+            WorldMobSpawner.SpawnMobs(this, true, this.WorldTicks % 400 == 0);
+        }
+  
+        /// <summary>
+        /// Yields each <see cref="StructBlock"/> found within the bounds of a <see cref="BoundingBox"/>
+        /// </summary>
+        /// <param name="boundingBox"></param>
+        /// <returns></returns>
+        public IEnumerable<IStructBlock> GetBlocksInBoundingBox(BoundingBox boundingBox)
+        {
+            UniversalCoords minimum =
+                UniversalCoords.FromAbsWorld(
+                    boundingBox.Minimum.X < 0.0 ? boundingBox.Minimum.X - 1.0 : boundingBox.Minimum.X,
+                    boundingBox.Minimum.Y < 0.0 ? boundingBox.Minimum.Y - 1.0 : boundingBox.Minimum.Y,
+                    boundingBox.Minimum.Z < 0.0 ? boundingBox.Minimum.Z - 1.0 : boundingBox.Minimum.Z);
+            UniversalCoords maximum = UniversalCoords.FromAbsWorld(boundingBox.Maximum.X + 1.0,
+                                                                   boundingBox.Maximum.Y + 1.0,
+                                                                   boundingBox.Maximum.Z + 1.0);
 
-            Mob mob = MobFactory.CreateMob(this, this.Server.AllocateEntity(), type);
-
-            mob.Position = new AbsWorldCoords(new Vector3(coords.WorldX + 0.5, coords.WorldY, coords.WorldZ + 0.5));
-            mob.World = this;
-
-            mob.Hunter = true;
-            mob.Hunting = false;
-
-            //Event
-            EntitySpawnEventArgs e = new EntitySpawnEventArgs(mob, mob.Position);
-            Server.PluginManager.CallEvent(Plugins.Events.Event.ENTITY_SPAWN, e);
-            if (e.EventCanceled) return;
-            mob.Position = e.Location;
-            //End Event
-            
-            //mob.Data // Set accessor is inaccebile?
-            Server.AddEntity(mob);
+            return GetBlocksBetweenCoords(minimum, maximum);
         }
 
-        public void SpawnMob(UniversalCoords coords, MobType type = MobType.Pig)
+        /// <summary>
+        /// Yields each <see cref="StructBlock"/> found between two coordinates
+        /// </summary>
+        /// <param name="minimum">Start here</param>
+        /// <param name="maximum">Stop here</param>
+        /// <returns>Yields a <see cref="StructBlock"/> for each coordinate between minimum and maximum</returns>
+        public IEnumerable<IStructBlock> GetBlocksBetweenCoords(UniversalCoords minimum, UniversalCoords maximum)
         {
-            if (type == MobType.Pig) // Type has not been forced.
+            if (minimum.WorldX >= maximum.WorldX || minimum.WorldY >= maximum.WorldY || minimum.WorldZ >= maximum.WorldZ)
+                throw new ArgumentOutOfRangeException("minimum", "minimum X, Y and Z must be less than maximum X, Y and Z");
+
+            for (int x = minimum.WorldX; x < maximum.WorldX; x++)
             {
-                switch (Server.Rand.Next(4))
+                for (int y = minimum.WorldY; y < maximum.WorldY; y++)
                 {
-                    case 0: type = MobType.Zombie; break;
-                    case 1: type = MobType.Skeleton; break;
-                    case 2: type = MobType.Creeper; break;
-                    case 3: type = MobType.Spider; break; // TODO: Check space is larger than 1x2
+                    for (int z = minimum.WorldZ; z < maximum.WorldZ; z++)
+                    {
+                        yield return this.GetBlock(x, y, z);
+                    }
                 }
             }
+        }
 
-            Mob mob = MobFactory.CreateMob(this, this.Server.AllocateEntity(), type);
+        public IStructBlock GetBlock(UniversalCoords coords)
+        {
+            Chunk chunk = GetChunk(coords) as Chunk;
 
-            mob.Position = new AbsWorldCoords(new Vector3(coords.WorldX + 0.5, coords.WorldY, coords.WorldZ + 0.5));
-            mob.World = this;
+            if(chunk == null)
+                return StructBlock.Empty;
 
-            mob.Hunter = true;
-            mob.Hunting = false;
+            byte blockId = (byte)chunk.GetType(coords);
+            byte blockData = chunk.GetData(coords);
 
-            //Event
-            EntitySpawnEventArgs e = new EntitySpawnEventArgs(mob, mob.Position);
-            Server.PluginManager.CallEvent(Plugins.Events.Event.ENTITY_SPAWN, e);
-            if (e.EventCanceled) return;
-            mob.Position = e.Location;
-            //End Event
+            return new StructBlock(coords, blockId, blockData, this);
+        }
+
+        public IStructBlock GetBlock(int worldX, int worldY, int worldZ)
+        {
+            Chunk chunk = GetChunkFromWorld(worldX, worldZ) as Chunk;
+
+            if (chunk == null)
+                return StructBlock.Empty;
+
+            byte blockId = (byte)chunk.GetType(worldX & 0xF, worldY, worldZ & 0xF);
+            byte blockData = chunk.GetData(worldX & 0xF, worldY, worldZ & 0xF);
+
+            return new StructBlock(worldX, worldY, worldZ, blockId, blockData, this);
+        }
+                                                            
+        public byte? GetBlockId(UniversalCoords coords)
+        {
+            Chunk chunk = Chunks[coords];
+
+            if (chunk != null)
+                return (byte?)chunk.GetType(coords);
+
+            return null;
+        }
+
+        public byte? GetBlockId(int worldX, int worldY, int worldZ)
+        {
+            Chunk chunk = Chunks[worldX >> 4, worldZ >> 4];
+
+            if (chunk != null)
+                return (byte?)chunk.GetType(worldX & 0xF, worldY, worldZ & 0xF);
+
+            return null;
+        }
+
+        public byte? GetBlockData(UniversalCoords coords)
+        {
+            Chunk chunk = Chunks[coords];
+            if (chunk != null)
+                return chunk.GetData(coords);
+
+            return null;
+        }
+
+        public byte? GetBlockData(int worldX, int worldY, int worldZ)
+        {
+            Chunk chunk = Chunks[worldX >> 4, worldZ >> 4];
+            if (chunk != null)
+                return chunk.GetData(worldX & 0xF, worldY, worldZ & 0xF);
             
-            //mob.Data // Set accessor is inaccebile?
-            Server.AddEntity(mob); // TODO: Limit this in some way.
+            return null;
         }
 
-        public Chunk GetBlockChunk(UniversalCoords coords)
+        public double GetBlockLightBrightness(UniversalCoords coords)
         {
-            return GetChunk(coords, false, true);
-        }
+            byte? effectiveLight = GetEffectiveLight(coords);
+            if(effectiveLight == null)
+                return 0.0;
 
-        public Chunk GetBlockChunk(int worldX, int worldY, int worldZ)
+            return _lightBrightnessTable[(byte)effectiveLight];        
+        }       
+ 
+        public byte? GetFullBlockLight(UniversalCoords coords)
         {
-            return GetChunkFromWorld(worldX, worldZ, false, true);
-        }
+            Chunk chunk = GetChunk(coords, false, false) as Chunk;
 
-        public byte GetBlockId(UniversalCoords coords)
-        {
-            if (!ChunkExists(coords))
-                return 0;
-            return Chunks[coords][coords];
-        }
-
-        public byte GetBlockId(int worldX, int worldY, int worldZ)
-        {
-            if (!ChunkExists(worldX >> 4, worldZ >> 4))
-                return 0;
-            return (byte)Chunks[worldX >> 4, worldZ >> 4].GetType(worldX & 0xF, worldY, worldZ & 0xF);
-        }
-
-        public byte GetBlockData(UniversalCoords coords)
-        {
-            if (!ChunkExists(coords))
-                return 0;
-            return Chunks[coords].GetData(coords);
-        }
-
-        public byte GetBlockData(int worldX, int worldY, int worldZ)
-        {
-            if (!ChunkExists(worldX >> 4, worldZ >> 4))
-                return 0;
-            return Chunks[worldX >> 4, worldZ >> 4].GetData(worldX & 0xF, worldY, worldZ & 0xF);
-        }
-
-        public byte GetBlockLight(UniversalCoords coords)
-        {
-            if (!ChunkExists(coords))
-                return 0;
-            return Chunks[coords].GetBlockLight(coords);
-        }
-
-        public byte GetBlockLight(int worldX, int worldY, int worldZ)
-        {
-            if (!ChunkExists(worldX >> 4, worldZ >> 4))
-                return 0;
-            return Chunks[worldX >> 4, worldZ >> 4].GetBlockLight(worldX & 0xF, worldY, worldZ & 0xF);
-        }
-
-        public byte GetSkyLight(UniversalCoords coords)
-        {
-            if (!ChunkExists(coords))
-                return 0;
-            return Chunks[coords].GetSkyLight(coords);
-        }
-
-        public byte GetSkyLight(int worldX, int worldY, int worldZ)
-        {
-            if (!ChunkExists(worldX >> 4, worldZ >> 4))
-                return 0;
-            return Chunks[worldX >> 4, worldZ >> 4].GetSkyLight(worldX & 0xF, worldY, worldZ & 0xF);
-        }
-
-        public byte? GetBlockOrNull(UniversalCoords coords)
-        {
-            if (coords.WorldY < 0 || coords.WorldY > 127)
+            if (chunk == null)
                 return null;
-            if (!ChunkExists(coords))
-                return null;
-            return Chunks[coords][coords];
+                      
+            return Math.Max(chunk.GetSkyLight(coords), chunk.GetBlockLight(coords));        
         }
 
-        public byte? GetBlockOrNull(int worldX, int worldY, int worldZ)
+        /// <summary>
+        /// Get the Effective light at a coordinate
+        /// </summary>
+        /// <param name="coords"></param>
+        /// <returns></returns>
+        public byte? GetEffectiveLight(UniversalCoords coords)        
+        {            
+            // TODO: this needs to return the effective light for a block, taking into consideration the time of day etc... see calculateSkylightSubtracted and getBlockLightValue_do                        
+            return GetFullBlockLight(coords); // THIS HAS TO BE REMOVED AND CHANGED TO PROPER TIME CALCULATION TOO        
+        }        
+        
+        public byte? GetBlockLight(UniversalCoords coords)        
         {
-            if (worldY < 0 || worldY > 127)
-                return null;
-            if (!ChunkExists(worldX >> 4, worldZ >> 4))
-                return null;
-            return Chunks[worldX >> 4, worldZ >> 4][worldX & 0xF, worldY, worldZ & 0xF];
+            Chunk chunk = Chunks[coords];
+            if (chunk != null)
+                return chunk.GetBlockLight(coords);
+
+            return null;
         }
 
+        public byte? GetBlockLight(int worldX, int worldY, int worldZ)
+        {
+            Chunk chunk = Chunks[worldX >> 4, worldZ >> 4];
+            if (chunk != null)
+                return chunk.GetBlockLight(worldX & 0xF, worldY, worldZ & 0xF);
+
+            return null;
+        }
+
+        public byte? GetSkyLight(UniversalCoords coords)
+        {
+            Chunk chunk = Chunks[coords];
+            if (chunk != null)
+                return chunk.GetSkyLight(coords);
+
+            return null;
+        }
+
+        public byte? GetSkyLight(int worldX, int worldY, int worldZ)
+        {
+            Chunk chunk = Chunks[worldX >> 4, worldZ >> 4];
+            if (chunk != null)
+                return chunk.GetSkyLight(worldX & 0xF, worldY, worldZ & 0xF);
+
+            return null;
+        }
+  
+        public IEnumerable<IEntityBase> GetEntities()
+        {
+            EntityBase[] entities = Server.GetEntities() as EntityBase[];
+            return entities.Where((e) => e != null && e.World == this);
+        }
+
+        public IPlayer GetClosestPlayer(AbsWorldCoords coords, double radius)
+        {
+            Client[] clients = Server.GetAuthenticatedClients() as Client[];
+            var radiusSqrd = radius * radius;
+            Vector3 coordVector = coords.ToVector();
+            return (from c in clients.Where(client => client.Owner.World == this)
+                    let distance = coordVector.DistanceSquared(c.Owner.Position.ToVector())
+                    where distance <= radiusSqrd
+                    orderby distance
+                    select c.Owner).FirstOrDefault();
+        }
+
+        private RayTraceHitBlock DoRayTraceBlock(UniversalCoords coords, Vector3 rayStart, Vector3 rayEnd)
+        {
+            Chunk chunk = GetChunk(coords) as Chunk;
+
+            if (chunk == null)
+                return null;
+
+            byte blockType = (byte)chunk.GetType(coords); // only get the block type first to save time
+            if (blockType > 0)
+            {
+                byte blockData = chunk.GetData(coords);
+
+                StructBlock block = new StructBlock(coords, (byte)blockType, (byte)blockData, this);
+                BlockBase blockClass = BlockHelper.Instance.CreateBlockInstance(block.Type);
+                RayTraceHitBlock blockRayTrace = blockClass.RayTraceIntersection(block, rayStart, rayEnd);
+                if (blockRayTrace != null)
+                {
+                    return blockRayTrace;
+                }
+            }
+            return null;
+        }
+  
+        /// <summary>
+        /// Ray traces the blocks along the ray. This method takes approx 0.1ms per 50-60 metres.
+        /// </summary>
+        /// <returns>
+        /// The first block hit
+        /// </returns>
+        /// <param name='rayStart'>
+        /// Ray start.
+        /// </param>
+        /// <param name='rayEnd'>
+        /// Ray end.
+        /// </param>
+        internal RayTraceHitBlock RayTraceBlocks(AbsWorldCoords rayStart, AbsWorldCoords rayEnd)
+        {
+            UniversalCoords startCoord = UniversalCoords.FromAbsWorld(rayStart);
+            UniversalCoords endCoord = UniversalCoords.FromAbsWorld(rayEnd);
+            
+            UniversalCoords previousPoint;
+            UniversalCoords currentPoint = startCoord;
+            
+            Vector3 rayStartVec = rayStart.ToVector();
+            Vector3 rayEndVec = rayEnd.ToVector();
+            
+            Vector3 stepVector = (rayEndVec - rayStartVec).Normalize();
+            
+            bool xDirectionPositive = stepVector.X > 0;
+            bool yDirectionPositive = stepVector.Y > 0;
+            bool zDirectionPositive = stepVector.Z > 0;
+            
+            Vector3 currentVec = rayStartVec;
+            previousPoint = currentPoint;
+            
+            RayTraceHitBlock blockTrace = null;
+            int blockCheckCount = 0;
+            try
+            {
+                // Step along the ray looking for block collisions
+                while (true)
+                {
+                    #region Check adjacent blocks if necessary (to prevent skipping over the corner of one)
+                    bool xChanged = currentPoint.WorldX - previousPoint.WorldX != 0;
+                    bool yChanged = currentPoint.WorldY - previousPoint.WorldY != 0;
+                    bool zChanged = currentPoint.WorldZ - previousPoint.WorldZ != 0;
+                    
+                    // When we change a coord, need to check which adjacent block also needs to be checked (to prevent missing blocks when jumping over their corners)
+                    if (xChanged && yChanged && zChanged)
+                    {
+                        // -X,Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(previousPoint.WorldX, currentPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // X,-Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, previousPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // X,Y,-Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, currentPoint.WorldY, previousPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        
+                        // -X,Y,-Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(previousPoint.WorldX, currentPoint.WorldY, previousPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // -X,-Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(previousPoint.WorldX, previousPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // X,-Y,-Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, previousPoint.WorldY, previousPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                    }
+                    else if (xChanged && zChanged)
+                    {
+                        // -X,Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(previousPoint.WorldX, currentPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // X,Y,-Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, currentPoint.WorldY, previousPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                    }
+                    else if (xChanged && yChanged)
+                    {
+                        // -X,Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(previousPoint.WorldX, currentPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // X,-Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, previousPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                    }
+                    else if (zChanged && yChanged)
+                    {
+                        // X,Y,-Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, currentPoint.WorldY, previousPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                        // X,-Y,Z
+                        blockCheckCount++;
+                        blockTrace = DoRayTraceBlock(UniversalCoords.FromWorld(currentPoint.WorldX, previousPoint.WorldY, currentPoint.WorldZ), rayStartVec, rayEndVec);
+                        if (blockTrace != null)
+                            return blockTrace;
+                    }
+                    #endregion
+                    
+                    // Check the currentPoint
+                    blockCheckCount++;
+                    blockTrace = DoRayTraceBlock(currentPoint, rayStartVec, rayEndVec);
+                    if (blockTrace != null)
+                        return blockTrace;
+                    
+                    if (currentPoint == endCoord)
+                    {
+                        //Console.WriteLine("Reach endCoord with no hits");
+                        break;
+                    }
+                    
+                    #region Get the next coordinate
+                    previousPoint = currentPoint;
+                    do
+                    {
+                        currentVec += stepVector;
+                        currentPoint = UniversalCoords.FromAbsWorld(currentVec.X, currentVec.Y, currentVec.Z);
+                    } while(previousPoint == currentPoint);
+                    
+                    // check we haven't gone past the endCoord
+                    if ((xDirectionPositive && currentPoint.WorldX > endCoord.WorldX) || (!xDirectionPositive && currentPoint.WorldX < endCoord.WorldX) ||
+                        (yDirectionPositive && currentPoint.WorldY > endCoord.WorldY) || (!yDirectionPositive && currentPoint.WorldY < endCoord.WorldY) ||
+                        (zDirectionPositive && currentPoint.WorldZ > endCoord.WorldZ) || (!zDirectionPositive && currentPoint.WorldZ < endCoord.WorldZ))
+                    {
+                        //Console.WriteLine("Went past endCoord: {0}, {1}", startCoord, endCoord);
+                        break;
+                    }
+                    #endregion
+                }
+            }
+            finally
+            {
+                //Console.WriteLine("Block check count {0}", blockCheckCount);
+            }
+            return null;
+        }
+                    
         public long GetSeed()
         {
-            return Settings.Default.WorldSeed.GetHashCode();
+            if (ChraftConfig.WorldSeed == string.Empty)
+            {
+                return DateTime.Now.ToString().GetHashCode();
+            }
+                return ChraftConfig.WorldSeed.GetHashCode();
         }
 
-        public void SetBlockAndData(UniversalCoords coords, byte type, byte data)
+        public void SetBlockAndData(UniversalCoords coords, byte type, byte data, bool needsUpdate = true)
         {
-            Chunk chunk = GetChunk(coords, false, true);
-            chunk.SetType(coords, (BlockData.Blocks)type);
-            chunk.SetData(coords, data, true);
+            Chunk chunk = GetChunk(coords) as Chunk;
+
+            if(chunk == null)
+                return;
+
+            chunk.SetType(coords, (BlockData.Blocks)type, false);
+            chunk.SetData(coords, data, false);
+
+            if(needsUpdate)
+                chunk.BlockNeedsUpdate(coords.BlockX, coords.BlockY, coords.BlockZ);
         }
 
-        public void SetBlockAndData(int worldX, int worldY, int worldZ, byte type, byte data)
+        public void SetBlockAndData(int worldX, int worldY, int worldZ, byte type, byte data, bool needsUpdate = true)
         {
-            Chunk chunk = GetChunkFromWorld(worldX, worldZ, false, true);
-            chunk.SetType(worldX & 0xF, worldY, worldZ & 0xF, (BlockData.Blocks)type);
-            chunk.SetData(worldX & 0xF, worldY, worldZ & 0xF, data, true);
+            Chunk chunk = GetChunkFromWorld(worldX, worldZ) as Chunk;
+
+            if (chunk == null)
+                return;
+
+            chunk.SetType(worldX & 0xF, worldY, worldZ & 0xF, (BlockData.Blocks)type, false);
+            chunk.SetData(worldX & 0xF, worldY, worldZ & 0xF, data, false);
+
+            if (needsUpdate)
+                chunk.BlockNeedsUpdate(worldX & 0xF, worldY, worldZ & 0xF);
         }
 
-        public void SetBlockData(UniversalCoords coords, byte data)
+        public void SetBlockData(UniversalCoords coords, byte data, bool needsUpdate = true)
         {
-            GetChunk(coords, false, true).SetData(coords, data, true);
+            Chunk chunk = GetChunk(coords) as Chunk;
+
+            if(chunk != null)
+                chunk.SetData(coords, data, needsUpdate);
         }
 
-        public void SetBlockData(int worldX, int worldY, int worldZ, byte data)
+        public void SetBlockData(int worldX, int worldY, int worldZ, byte data, bool needsUpdate = true)
         {
-            GetChunkFromWorld(worldX, worldZ, false, true).SetData(worldX & 0xF, worldY, worldZ & 0xF, data, true);
+            Chunk chunk = GetChunkFromWorld(worldX, worldZ) as Chunk;
+
+            if(chunk != null)
+                chunk.SetData(worldX & 0xF, worldY, worldZ & 0xF, data, needsUpdate);
         }
 
         public bool ChunkExists(UniversalCoords coords)
@@ -732,45 +1189,59 @@ namespace Chraft.World
             return (Chunks[chunkX, chunkZ] != null);
         }
 
-        public void RemoveChunk(Chunk c)
+        public void RemoveChunk(IChunk c)
         {
-            Chunks.Remove(c);
+            Chunks.Remove(c as Chunk);
         }
 
         internal void Update(UniversalCoords coords, bool updateClients = true)
         {
-            Chunk chunk = GetChunk(coords, false, true);
+            Chunk chunk = GetChunk(coords) as Chunk;
+
+            if (chunk == null)
+                return;
+
             if (updateClients)
                 chunk.BlockNeedsUpdate(coords.BlockX, coords.BlockY, coords.BlockZ);
 
             UpdatePhysics(coords);
-            chunk.ForAdjacent(coords, delegate(UniversalCoords uc)
-            {
-                UpdatePhysics(uc);
-            });
+            chunk.ForAdjacent(coords, uc => UpdatePhysics(uc));
         }
 
         private void UpdatePhysics(UniversalCoords coords, bool updateClients = true)
         {
-            BlockData.Blocks type = (BlockData.Blocks)GetBlockId(coords);
-            UniversalCoords oneDown = UniversalCoords.FromWorld(coords.WorldX, coords.WorldY - 1, coords.WorldZ);
+            Chunk chunk = GetChunk(coords) as Chunk;
+
+            if (chunk == null)
+                return;
+
+            BlockData.Blocks type = chunk.GetType(coords);
+            UniversalCoords oneDown = UniversalCoords.FromWorld(coords.WorldX, coords.WorldY - 1, coords.WorldZ);        
 
             if (type == BlockData.Blocks.Water)
             {
                 byte water = 8;
-                GetChunk(coords, false, true).ForNSEW(coords, delegate(UniversalCoords uc)
+                chunk.ForNSEW(coords, delegate(UniversalCoords uc)
                 {
-                    if (GetBlockId(uc) == (byte)BlockData.Blocks.Still_Water)
+                    Chunk nearbyChunk = GetChunk(uc) as Chunk;
+
+                    if (nearbyChunk == null)
+                        return;
+
+                    BlockData.Blocks blockId = nearbyChunk.GetType(uc);
+                    byte blockData;
+                    if (blockId == BlockData.Blocks.Still_Water)
                         water = 0;
-                    else if (GetBlockId(uc) == (byte)BlockData.Blocks.Water && GetBlockData(uc) < water)
-                        water = (byte)(GetBlockData(uc) + 1);
+                    else if (blockId == BlockData.Blocks.Water && (blockData = nearbyChunk.GetData(uc)) < water)
+                        water = (byte)(blockData + 1);
                 });
-                if (water != GetBlockData(coords))
+
+                if (water != chunk.GetData(coords))
                 {
                     if (water == 8)
-                        SetBlockAndData(coords, 0, 0);
+                        chunk.SetBlockAndData(coords, 0, 0);
                     else
-                        SetBlockAndData(coords, (byte)BlockData.Blocks.Water, water);
+                        chunk.SetBlockAndData(coords, (byte)BlockData.Blocks.Water, water);
                     //Update(x, y, z, updateClients);
                     return;
                 }
@@ -779,32 +1250,41 @@ namespace Chraft.World
             if (type == BlockData.Blocks.Air)
             {
                 UniversalCoords oneUp = UniversalCoords.FromWorld(coords.WorldX, coords.WorldY + 1, coords.WorldZ);
-                if (coords.WorldY < 127 && (GetBlockId(oneUp) == (byte)BlockData.Blocks.Water || GetBlockId(oneUp) == (byte)BlockData.Blocks.Still_Water))
+                BlockData.Blocks blockIdOneUp = chunk.GetType(oneUp);
+                if (coords.WorldY < 127 && (blockIdOneUp == BlockData.Blocks.Water || blockIdOneUp == BlockData.Blocks.Still_Water))
                 {
-                    SetBlockAndData(coords, (byte)BlockData.Blocks.Water, 0);
+                    chunk.SetBlockAndData(coords, (byte)BlockData.Blocks.Water, 0);
                     //Update(x, y, z, updateClients);
                     return;
                 }
 
-                if (coords.WorldY < 127 && (GetBlockId(oneUp) == (byte)BlockData.Blocks.Lava || GetBlockId(oneUp) == (byte)BlockData.Blocks.Still_Lava))
+                if (coords.WorldY < 127 && (blockIdOneUp == BlockData.Blocks.Lava || blockIdOneUp == BlockData.Blocks.Still_Lava))
                 {
-                    SetBlockAndData(coords, (byte)BlockData.Blocks.Lava, 0);
+                    chunk.SetBlockAndData(coords, (byte)BlockData.Blocks.Lava, 0);
                     //Update(x, y, z, updateClients);
                     return;
                 }
 
                 byte water = 8;
-                Chunk chunk = GetChunk(coords, false, true);
+
                 chunk.ForNSEW(coords, delegate(UniversalCoords uc)
                 {
-                    if (GetBlockId(uc) == (byte)BlockData.Blocks.Still_Water)
+                    Chunk nearbyChunk = GetChunk(uc) as Chunk;
+
+                    if (nearbyChunk == null)
+                        return;
+
+                    BlockData.Blocks blockId = nearbyChunk.GetType(uc);
+                    byte blockData;
+
+                    if (blockId == BlockData.Blocks.Still_Water)
                         water = 0;
-                    else if (GetBlockId(uc) == (byte)BlockData.Blocks.Water && GetBlockData(uc) < water)
-                        water = (byte)(GetBlockData(uc) + 1);
+                    else if (blockId == BlockData.Blocks.Water && (blockData = nearbyChunk.GetData(uc)) < water)
+                        water = (byte)(blockData + 1);
                 });
                 if (water < 8)
                 {
-                    SetBlockAndData(coords, (byte)BlockData.Blocks.Water, water);
+                    chunk.SetBlockAndData(coords, (byte)BlockData.Blocks.Water, water);
                     //Update(x, y, z, updateClients);
                     return;
                 }
@@ -812,63 +1292,25 @@ namespace Chraft.World
                 byte lava = 8;
                 chunk.ForNSEW(coords, delegate(UniversalCoords uc)
                 {
-                    if (GetBlockId(uc) == (byte)BlockData.Blocks.Still_Lava)
+                    Chunk nearbyChunk = GetChunk(uc) as Chunk;
+
+                    if (nearbyChunk == null)
+                        return;
+
+                    BlockData.Blocks blockId = nearbyChunk.GetType(uc);
+                    byte blockData;
+
+                    if (blockId == BlockData.Blocks.Still_Lava)
                         lava = 0;
-                    else if (GetBlockId(uc) == (byte)BlockData.Blocks.Lava && GetBlockData(uc) < lava)
-                        lava = (byte)(GetBlockData(uc) + 1);
+                    else if (blockId == BlockData.Blocks.Lava && (blockData = nearbyChunk.GetData(uc)) < lava)
+                        lava = (byte)(blockData + 1);
                 });
                 if (water < 4)
                 {
-                    SetBlockAndData(coords, (byte)BlockData.Blocks.Lava, lava);
+                    chunk.SetBlockAndData(coords, (byte)BlockData.Blocks.Lava, lava);
                     //Update(x, y, z, updateClients);
                     return;
                 }
-            }
-        }
-
-        internal bool GrowTree(int x, int y, int z, byte treeType = (byte) 0)
-        {
-            // TODO: Expand this futher to build redwood.
-            if (y > 120)
-                return false;
-
-            for (int by = y; by < y + 5; by++)
-                SetBlockAndData(x, by, z, (byte)BlockData.Blocks.Log, treeType);
-
-            for (int by = y + 2; by < y + 5; by++)
-                for (int bx = x - 2; bx <= x + 2; bx++)
-                    for (int bz = z - 2; bz <= z + 2; bz++)
-                        SetLeaves(bx, by, bz);
-
-            for (int bx = x - 1; bx <= x + 1; bx++)
-                for (int bz = z - 1; bz <= z + 1; bz++)
-                    SetLeaves(bx, y + 5, bz);
-            return true;
-        }
-
-        private void SetLeaves(int x, int y, int z, byte treeType = (byte) 0)
-        {
-            if (!ChunkExists(x >> 4, z >> 4) || GetBlockId(x, y, z) != 0)
-                return;
-            SetBlockAndData(x, y, z, (byte)BlockData.Blocks.Leaves, treeType);
-        }
-
-        internal void GrowCactus(UniversalCoords coords)
-        {
-            if (coords.WorldY > 120)
-                return;
-
-            //World.Logger.Log(Logger.LogLevel.Info, "Checking Cactus at: " + (X + x) + " " + (Y + y) + " " + (Z + z));
-            // TODO: Fixing this, NSEW isn't working as it's supposed to.
-            for (int by = coords.WorldY; by < coords.WorldY + 3; by++)
-            {
-                if (!GetChunk(coords, false, true).IsNSEWTo(UniversalCoords.FromWorld(coords.WorldX, by, coords.WorldZ), (byte)BlockData.Blocks.Air))
-                    return;
-            }
-
-            for (int by = coords.WorldY; by < coords.WorldY + 3; by++)
-            {
-                SetBlockAndData(UniversalCoords.FromWorld(coords.WorldX, by, coords.WorldZ), (byte)BlockData.Blocks.Cactus, 0);
             }
         }
 

@@ -1,4 +1,20 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -27,15 +43,15 @@ namespace Chraft.Interfaces
         {
             List<ItemStack> ingredients = new List<ItemStack>();
             for (short i = 1; i <= this.CraftingSlotCount; i++)
-                ingredients.Add(ItemStack.IsVoid(Slots[i]) ? ItemStack.Void : this[i]);
+                ingredients.Add(Slots[i].IsVoid() ? ItemStack.Void : this[i]);
             return Recipe.GetRecipe(Server.GetRecipes(), ingredients.ToArray());
         }
 
         internal override void OnClicked(WindowClickPacket packet)
         {
-            if (packet.Slot == 0 && !ItemStack.IsVoid(this[0]))
+            if (packet.Slot == 0 && !this[0].IsVoid())
             {
-                if (!ItemStack.IsVoid(Cursor))
+                if (!Cursor.IsVoid())
                 {
                     if (Cursor.Type != this[0].Type || Cursor.Durability != this[0].Durability || Cursor.Count + this[0].Count > 64)
                     {
@@ -63,14 +79,14 @@ namespace Chraft.Interfaces
                 this.Cursor.Count += this[0].Count;
 
                 // Cook Ingredients, and update recipe output slot in case ingredients are now insufficient for another
-                if (!ItemStack.IsVoid(this[0]))
+                if (!this[0].IsVoid())
                 {
                     Recipe recipe = GetRecipe();
                     if (recipe != null)
                     {
                         List<ItemStack> ingredients = new List<ItemStack>();
                         for (short i = 1; i <= this.CraftingSlotCount; i++)
-                            ingredients.Add(ItemStack.IsVoid(Slots[i]) ? ItemStack.Void : this[i]);
+                            ingredients.Add(Slots[i].IsVoid() ? ItemStack.Void : this[i]);
 
                         // Use the ingredients
                         recipe.UseIngredients(ingredients.ToArray());
@@ -78,7 +94,7 @@ namespace Chraft.Interfaces
                         // Check if any now have a count of 0 then set the slot to void
                         foreach (var item in ingredients)
                         {
-                            if (!ItemStack.IsVoid(item) && item.Count <= 0) // should never be less than 0, just some defensive coding
+                            if (!item.IsVoid() && item.Count <= 0) // should never be less than 0, just some defensive coding
                             {
                                 this[item.Slot] = ItemStack.Void;
                             }

@@ -1,24 +1,45 @@
-﻿using System;
-using System.Collections.Generic;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
 using System.Linq;
-using System.Text;
 using Chraft.Net;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Commands;
+using Chraft.PluginSystem.Net;
+using Chraft.Plugins;
+using Chraft.Utilities;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Misc;
 using Chraft.World;
 
 namespace Chraft.Commands
 {
-    public class CmdTp : ClientCommand
+    internal class CmdTp : IClientCommand
     {
-        public ClientCommandHandler ClientCommandHandler { get; set; }
+        public IClientCommandHandler ClientCommandHandler { get; set; }
 
-        public void Use(Client client, string[] tokens)
+        public void Use(IClient iClient, string commandName, string[] tokens)
         {
-            if (tokens.Length < 2)
+            Client client = iClient as Client;
+            if (tokens.Length < 1)
             {
                 client.SendMessage("§cPlease specify a target.");
                 return;
             }
-            Client[] targets = client.Owner.Server.GetClients(tokens[1]).ToArray();
+            Client[] targets = client.Owner.Server.GetClients(tokens[0]).ToArray() as Client[];
             if (targets.Length < 1)
             {
                 client.SendMessage("§cUnknown player.");
@@ -29,8 +50,8 @@ namespace Chraft.Commands
             client.Owner.World = target.Owner.World;
             client.Owner.TeleportTo(new AbsWorldCoords(target.Owner.Position.X, target.Owner.Position.Y, target.Owner.Position.Z));
         }
-
-        public void Help(Client client)
+        
+        public void Help(IClient client)
         {
             client.SendMessage("/tp <Target> - Teleports you to <Target>'s location.");
         }
@@ -54,20 +75,22 @@ namespace Chraft.Commands
         {
             get { return "chraft.tp"; }
         }
+
+        public IPlugin Iplugin { get; set; }
     }
-    public class CmdSummon : ClientCommand
+    internal class CmdSummon : IClientCommand
     {
+        public IClientCommandHandler ClientCommandHandler { get; set; }
 
-        public ClientCommandHandler ClientCommandHandler { get; set; }
-
-        public void Use(Client client, string[] tokens)
+        public void Use(IClient iClient, string commandName, string[] tokens)
         {
-            if (tokens.Length < 2)
+            Client client = iClient as Client;
+            if (tokens.Length < 1)
             {
                 client.SendMessage("§cPlease specify a target.");
                 return;
             }
-            Client[] targets = client.Owner.Server.GetClients(tokens[1]).ToArray();
+            Client[] targets = client.Owner.Server.GetClients(tokens[0]).ToArray() as Client[];
             if (targets.Length < 1)
             {
                 client.SendMessage("§cUnknown payer.");
@@ -80,7 +103,7 @@ namespace Chraft.Commands
             }
         }
 
-        public void Help(Client client)
+        public void Help(IClient client)
         {
             client.SendMessage("/tphere <Player> - Teleports <Player> to you.");
         }
@@ -104,5 +127,7 @@ namespace Chraft.Commands
         {
             get { return "chraft.tphere"; }
         }
+
+        public IPlugin Iplugin { get; set; }
     }
 }

@@ -1,14 +1,36 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Chraft.Net;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Item;
+using Chraft.PluginSystem.Net;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Misc;
 using Chraft.World;
 using Chraft.Interfaces;
 
 namespace Chraft.Entity.Mobs
 {
-    public class Wolf : Mob
+    public class Wolf : Animal
     {
         public override string Name
         {
@@ -52,6 +74,14 @@ namespace Chraft.Entity.Mobs
             }
         }
 
+        public override int MaxSpawnedPerGroup
+        {
+            get
+            {
+                return 8;
+            }
+        }
+
         protected virtual int BonesUntilTamed { get; set; }
 
         internal Wolf(Chraft.World.WorldManager world, int entityId, Chraft.Net.MetaData data = null)
@@ -65,13 +95,15 @@ namespace Chraft.Entity.Mobs
 
         protected override void DoDeath(EntityBase killedBy)
         {
+            base.DoDeath(killedBy);
         }
 
-        protected override void DoInteraction(Client client, Chraft.Interfaces.ItemStack item)
+        protected override void DoInteraction(IClient iClient, IItemStack item)
         {
-            base.DoInteraction(client, item);
+            base.DoInteraction(iClient, item);
 
-            if (!ItemStack.IsVoid(item))
+            Client client = iClient as Client;
+            if (item != null && !item.IsVoid())
             {
                 if ((item.Type == (short)BlockData.Items.Pork || item.Type == (short)BlockData.Items.Grilled_Pork))
                 {
@@ -100,7 +132,7 @@ namespace Chraft.Entity.Mobs
                     if (this.BonesUntilTamed <= 0)
                     {
                         this.Data.IsTamed = true;
-                        this.Data.TamedBy = client.Owner.Username;
+                        this.Data.TamedBy = client.Username;
                         this.Health = this.MaxHealth;
                         // TODO: begin following this.Data.TamedBy
                         SendMetadataUpdate();

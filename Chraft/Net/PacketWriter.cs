@@ -1,17 +1,33 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using Chraft.Net.Packets;
 
 namespace Chraft.Net
 {
     public class PacketWriter
     {
-        private static Stack<PacketWriter> _Pool = new Stack<PacketWriter>();
-
-        public StreamRole Role { get; private set; }
+        private static ConcurrentStack<PacketWriter> _Pool = new ConcurrentStack<PacketWriter>();
 
         private int _Capacity;
         public int Capacity
@@ -34,42 +50,42 @@ namespace Chraft.Net
             set { _Strings = value; }
         }
 
-        public PacketWriter(int capacity, StreamRole role)
+        public PacketWriter(int capacity)
         {
             _Stream = new MemoryStream(capacity);
             _Capacity = capacity;
-            Role = role;
         }
 
-        public static PacketWriter CreateInstance(int capacity, StreamRole role, Queue<byte[]> strings)
+        public static PacketWriter CreateInstance(int capacity, Queue<byte[]> strings)
         {
-            PacketWriter pw = CreateInstance(capacity, role);
+            PacketWriter pw = CreateInstance(capacity);
             pw.Strings = strings;
             return pw;
         }
 
-        public static PacketWriter CreateInstance(StreamRole role)
+        public static PacketWriter CreateInstance()
         {
-            return CreateInstance(32, role);
+            return CreateInstance(32);
         }
 
-        public static PacketWriter CreateInstance(int capacity, StreamRole role)
+        public static PacketWriter CreateInstance(int capacity)
         {
             PacketWriter pw = null;
 
             if (_Pool.Count > 0)
             {
-                pw = _Pool.Pop();
-
+                _Pool.TryPop(out pw);
+                    
                 if (pw != null)
                 {
                     pw._Capacity = capacity;
                     pw._Stream.SetLength(0);
+                    pw._Stream.Position = 0;
                 }
             }
 
             if (pw == null)
-                pw = new PacketWriter(capacity, role);
+                pw = new PacketWriter(capacity);
 
             return pw;
         }
@@ -82,9 +98,10 @@ namespace Chraft.Net
             {
                 try
                 {
-                    using (StreamWriter op = new StreamWriter("neterr.log"))
+                    using (StreamWriter op = new StreamWriter("neterr.log", true))
                     {
                         op.WriteLine("{0}\tInstance pool contains writer", DateTime.Now);
+                        op.WriteLine();
                     }
                 }
                 catch
@@ -110,6 +127,12 @@ namespace Chraft.Net
         }
 
         public void Write(short data)
+        {
+            Write(unchecked((byte)(data >> 8)));
+            Write(unchecked((byte)data));
+        }
+
+        public void Write(ushort data)
         {
             Write(unchecked((byte)(data >> 8)));
             Write(unchecked((byte)data));
@@ -148,12 +171,16 @@ namespace Chraft.Net
         public void Write(string data)
         {
             byte[] b;
-            if (_Strings != null)
+            int length = data.Length;
+            if (_Strings != null && _Strings.Count > 0)
+            {
                 b = _Strings.Dequeue();
+                length = b.Length/2;
+            }
             else
                 b = ASCIIEncoding.BigEndianUnicode.GetBytes(data);
 
-            Write((short)data.Length);
+            Write((short)length);
             Write(b, 0, b.Length);
         }
 

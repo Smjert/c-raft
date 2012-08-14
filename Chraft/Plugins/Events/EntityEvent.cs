@@ -1,18 +1,33 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using Chraft.Plugins.Events.Args;
-using Chraft.Plugins.Listener;
+using Chraft.PluginSystem.Args;
+using Chraft.PluginSystem.Event;
+using Chraft.PluginSystem.Listener;
 
 namespace Chraft.Plugins.Events
 {
-    public class EntityEvent : ChraftEventHandler
+    public class EntityEvent : IChraftEventHandler
     {
         public EntityEvent()
         {
-            events.AddRange(new Event[]{Event.ENTITY_ATTACK, Event.ENTITY_DAMAGE, Event.ENTITY_DEATH,
-                Event.ENTITY_MOVE, Event.ENTITY_SPAWN});
+            events.AddRange(new Event[]{Event.EntityAttack, Event.EntityDamage, Event.EntityDeath,
+                Event.EntityMove, Event.EntitySpawn});
         }
         public EventType Type
         {
@@ -24,31 +39,31 @@ namespace Chraft.Plugins.Events
         private List<Event> events = new List<Event>();
         private List<EventListener> plugins = new List<EventListener>();
 
-        public void CallEvent(Event Event, Args.ChraftEventArgs e)
+        public void CallEvent(Event Event, ChraftEventArgs e)
         {
             switch (Event)
             {
-                case Event.ENTITY_ATTACK:
+                case PluginSystem.Event.Event.EntityAttack:
                     OnAttack(e as EntityAttackEventArgs);
                     break;
-                case Event.ENTITY_DAMAGE:
+                case PluginSystem.Event.Event.EntityDamage:
                     OnDamaged(e as EntityDamageEventArgs);
                     break;
-                case Event.ENTITY_DEATH:
+                case PluginSystem.Event.Event.EntityDeath:
                     OnDeath(e as EntityDeathEventArgs);
                     break;
-                case Event.ENTITY_MOVE:
+                case PluginSystem.Event.Event.EntityMove:
                     OnMove(e as EntityMoveEventArgs);
                     break;
-                case Event.ENTITY_SPAWN:
+                case PluginSystem.Event.Event.EntitySpawn:
                     OnSpawn(e as EntitySpawnEventArgs);
                     break;
             }
         }
 
-        public void RegisterEvent(EventListener Listener)
+        public void RegisterEvent(EventListener listener)
         {
-            plugins.Add(Listener);
+            plugins.Add(listener);
         }
 
         #region LocalHooks
@@ -56,9 +71,9 @@ namespace Chraft.Plugins.Events
         {
             foreach (EventListener el in Plugins)
             {
-                if (el.Event == Event.ENTITY_DEATH)
+                if (el.Event == Event.EntityDeath)
                 {
-                    EntityListener l = el.Listener as EntityListener;
+                    IEntityListener l = el.Listener as IEntityListener;
                     l.OnDeath(e);
                 }
             }
@@ -67,9 +82,9 @@ namespace Chraft.Plugins.Events
         {
             foreach (EventListener el in Plugins)
             {
-                if (el.Event == Event.ENTITY_SPAWN)
+                if (el.Event == Event.EntitySpawn)
                 {
-                    EntityListener l = el.Listener as EntityListener;
+                    IEntityListener l = el.Listener as IEntityListener;
                     l.OnSpawn(e);
                 }
             }
@@ -78,9 +93,9 @@ namespace Chraft.Plugins.Events
         {
             foreach (EventListener el in Plugins)
             {
-                if (el.Event == Event.ENTITY_MOVE)
+                if (el.Event == Event.EntityMove)
                 {
-                    EntityListener l = el.Listener as EntityListener;
+                    IEntityListener l = el.Listener as IEntityListener;
                     l.OnMove(e);
                 }
             }
@@ -89,9 +104,9 @@ namespace Chraft.Plugins.Events
         {
             foreach (EventListener el in Plugins)
             {
-                if (el.Event == Event.ENTITY_DAMAGE)
+                if (el.Event == Event.EntityDamage)
                 {
-                    EntityListener l = el.Listener as EntityListener;
+                    IEntityListener l = el.Listener as IEntityListener;
                     l.OnDamaged(e);
                 }
             }
@@ -100,9 +115,9 @@ namespace Chraft.Plugins.Events
         {
             foreach (EventListener el in Plugins)
             {
-                if (el.Event == Event.ENTITY_ATTACK)
+                if (el.Event == Event.EntityAttack)
                 {
-                    EntityListener l = el.Listener as EntityListener;
+                    IEntityListener l = el.Listener as IEntityListener;
                     l.OnAttack(e);
                 }
             }

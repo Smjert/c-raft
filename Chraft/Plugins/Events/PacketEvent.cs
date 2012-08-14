@@ -1,17 +1,32 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using Chraft.Plugins.Listener;
-using Chraft.Plugins.Events.Args;
+using Chraft.PluginSystem.Args;
+using Chraft.PluginSystem.Event;
+using Chraft.PluginSystem.Listener;
 
 namespace Chraft.Plugins.Events
 {
-    public class PacketEvent : ChraftEventHandler
+    public class PacketEvent : IChraftEventHandler
     {
         public PacketEvent()
         {
-            events.AddRange(new Event[] { Event.PACKET_RECEIVED, Event.PACKET_SENT });
+            events.AddRange(new Event[] { Event.PacketReceived, Event.PacketSent });
         }
         public EventType Type { get { return EventType.Other; } }
         public List<Event> Events { get { return events; } }
@@ -23,25 +38,25 @@ namespace Chraft.Plugins.Events
         {
             switch (Event)
             {
-                case Event.PACKET_RECEIVED:
+                case PluginSystem.Event.Event.PacketReceived:
                     OnPacketReceived(e as PacketRecevedEventArgs);
                     break;
-                case Event.PACKET_SENT:
+                case PluginSystem.Event.Event.PacketSent:
                     OnPacketSent(e as PacketSentEventArgs);
                     break;
             }
         }
-        public void RegisterEvent(EventListener Listener)
+        public void RegisterEvent(EventListener listener)
         {
-            plugins.Add(Listener);
+            plugins.Add(listener);
         }
         #region Local Hooks
         private void OnPacketReceived(PacketRecevedEventArgs e)
         {
             foreach (EventListener el in Plugins)
             {
-                PacketListener pl = (PacketListener)el.Listener;
-                if (el.Event == Event.PACKET_RECEIVED)
+                IPacketListener pl = (IPacketListener)el.Listener;
+                if (el.Event == Event.PacketReceived)
                     pl.OnPacketReceived(e);
             }
         }
@@ -49,8 +64,8 @@ namespace Chraft.Plugins.Events
         {
             foreach (EventListener el in Plugins)
             {
-                PacketListener pl = (PacketListener)el.Listener;
-                if (el.Event == Event.PACKET_SENT)
+                IPacketListener pl = (IPacketListener)el.Listener;
+                if (el.Event == Event.PacketSent)
                     pl.OnPacketSent(e);
             }
         }

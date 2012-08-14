@@ -1,13 +1,32 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
+using Chraft.Entity;
 using Chraft.Interfaces;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Math;
 using Chraft.Utils;
+using Chraft.World.Blocks.Base;
 
 namespace Chraft.World.Blocks.Physics
 {
-    public class FallingSand : BlockBasePhysics
+    public class FallingSand : BaseFallingPhysics
     {
         protected byte BlockId;
 
@@ -20,11 +39,11 @@ namespace Chraft.World.Blocks.Physics
 
         public override void Simulate()
         {
-            int x = MathHelper.floor_double(Position.X);
-            int y = MathHelper.floor_double(Position.Y);
-            int z = MathHelper.floor_double(Position.Z);
-            byte blockId = World.GetBlockId(x, y, z);
-            if (blockId != (byte)BlockData.Blocks.Air)
+            int x = (int)Math.Floor(Position.X);
+            int y = (int)Math.Floor(Position.Y);
+            int z = (int)Math.Floor(Position.Z);
+            byte? blockId = World.GetBlockId(x, y, z);
+            if (blockId == null || blockId != (byte)BlockData.Blocks.Air)
             {
                 Stop();
                 return;
@@ -32,7 +51,7 @@ namespace Chraft.World.Blocks.Physics
 
             if (Position.Y <= 1)
             {
-                Stop();
+                Stop(true);
                 return;
             }
 
@@ -41,9 +60,13 @@ namespace Chraft.World.Blocks.Physics
 
         protected override void OnStop()
         {
-            UniversalCoords currentBlockCoords = UniversalCoords.FromWorld(Position.X, Position.Y, Position.Z);
-            byte blockId = World.GetBlockId(currentBlockCoords);
-            if (BlockHelper.Instance(blockId).IsAir)
+            UniversalCoords currentBlockCoords = UniversalCoords.FromAbsWorld(Position);
+            byte? blockId = World.GetBlockId(currentBlockCoords);
+
+            if (blockId == null)
+                return;
+
+            if (BlockHelper.Instance.IsAir((byte)blockId))
             {
                 World.Server.DropItem(World, currentBlockCoords, new ItemStack(BlockId, 1));
             }
@@ -53,7 +76,15 @@ namespace Chraft.World.Blocks.Physics
                                                                              currentBlockCoords.WorldY + 1,
                                                                              currentBlockCoords.WorldZ);
                 StructBlock aboveBlock = new StructBlock(aboveBlockCoords, BlockId, 0, World);
-                BlockHelper.Instance(BlockId).Spawn(aboveBlock);
+                BlockHelper.Instance.CreateBlockInstance(BlockId).Spawn(aboveBlock);
+
+                foreach (LivingEntity living in World.Server.GetNearbyLivings(World, aboveBlockCoords))
+                {
+                    if (Math.Abs(living.Position.X - aboveBlockCoords.WorldX) < 2 &&
+                        Math.Abs(living.Position.Z - aboveBlockCoords.WorldZ) < 2 &&
+                        Math.Abs(living.Position.Y + living.Height - aboveBlockCoords.WorldY) < 2)
+                        living.CheckSuffocation();
+                }
             }
             base.OnStop();
         }

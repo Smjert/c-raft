@@ -1,32 +1,63 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
 using System.Threading.Tasks;
+using Chraft.Commands;
 using Chraft.Interfaces;
 using Chraft.Interfaces.Recipes;
 using Chraft.Net.Packets;
-using Chraft.Properties;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Args;
+using Chraft.PluginSystem.Commands;
+using Chraft.PluginSystem.Entity;
+using Chraft.PluginSystem.Event;
+using Chraft.PluginSystem.Item;
+using Chraft.PluginSystem.Net;
+using Chraft.PluginSystem.Server;
+using Chraft.PluginSystem.World;
+using Chraft.PluginSystem.World.Blocks;
+using Chraft.Plugins;
+using Chraft.Utilities;
+using Chraft.Utilities.Collision;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Math;
+using Chraft.Utilities.Config;
 using System.Net;
 using System.Threading;
 using Chraft.Utils;
 using Chraft.World;
 using Chraft.Entity;
 using Chraft.Net;
-using Chraft.Plugins;
 using Chraft.Irc;
-using Chraft.Commands;
-using Chraft.Plugins.Events.Args;
-using Chraft.Plugins.Events;
+using Chraft.World.Blocks;
+using ICSharpCode.SharpZipLib.Zip.Compression;
 
 namespace Chraft
 {
-    public class Server
+    public class Server : IServer
     {
-
-        private volatile int NextEntityId = 0;
+        
+        private int NextEntityId;
+        private int NextSessionId;
         private bool Running = true;
         private Socket _Listener;
         private SocketAsyncEventArgs _AcceptEventArgs;
@@ -36,6 +67,16 @@ namespace Chraft
 
         public static ConcurrentQueue<Client> ClientsToDispose = new ConcurrentQueue<Client>();
 
+        private Timer _globalTick;
+        private Task _playerSaveTask;
+        private CancellationTokenSource _playerSaveToken;
+        public bool NeedsFullSave;
+        public bool FullSaving;
+        public ConcurrentQueue<Client> PlayersToSave;
+        public ConcurrentQueue<Client> PlayersToSavePostponed;
+
+        private Dictionary<string, IChunkGenerator> _generators;
+
 #if PROFILE
         public static PerformanceCounter CpuPerfCounter = new PerformanceCounter("Process", "% Processor Time", Process.GetCurrentProcess().ProcessName);
         public static DateTime ProfileStartTime = DateTime.MinValue;
@@ -44,47 +85,52 @@ namespace Chraft
         /// <summary>
         /// Invoked when a client is accepted and started.
         /// </summary>
-        public event EventHandler<ClientEventArgs> Joined;
+        internal event EventHandler<ClientEventArgs> Joined;
 
         /// <summary>
         /// Invoked whenever a user sends a command.
         /// </summary>
-        public event EventHandler<CommandEventArgs> Command;
+        internal event EventHandler<CommandEventArgs> Command;
 
         /// <summary>
         /// Triggered every ten seconds in a dedicated thread.
         /// </summary>
-        public event EventHandler Pulse;
+        internal event EventHandler Pulse;
 
         /// <summary>
         /// Invoked prior to a client being accepted, before any data is transcieved.
         /// </summary>
-        public event EventHandler<TcpEventArgs> BeforeAccept;
+        internal event EventHandler<TcpEventArgs> BeforeAccept;
 
         /// <summary>
         /// Gets the PluginManager for the server.
         /// </summary>
-        public PluginManager PluginManager { get; private set; }
+        internal PluginManager PluginManager { get; private set; }
 
         /// <summary>
         /// Gets the ClientCommandHandler for the server.
         /// </summary>
-        public ClientCommandHandler ClientCommandHandler { get; private set; }
+        internal ClientCommandHandler ClientCommandHandler { get; private set; }
 
         /// <summary>
         /// Gets the ServerCommandHandler for the server.
         /// </summary>
-        public ServerCommandHandler ServerCommandHandler { get; private set; }
+        internal ServerCommandHandler ServerCommandHandler { get; private set; }
 
         /// <summary>
-        /// Gets a thread-safe list of clients.  Use GetClients for a thread-safe version.
+        /// Gets a thread-safe dictionary of clients.  Use GetClients for an array version.
         /// </summary>
-        public ConcurrentDictionary<int, Client> Clients { get; private set; }
+        internal ConcurrentDictionary<int, Client> Clients { get; private set; }
+
+        /// <summary>
+        /// Gets a thread-safe dictionary of authenticated clients.  Use GetAuthenticatedClients for an array version.
+        /// </summary>
+        internal ConcurrentDictionary<int, Client> AuthClients { get; private set; }
 
         /// <summary>
         /// Gets a thread-unsafe list of worlds.  Use GetWorlds for a thread-safe version.
         /// </summary>
-        public List<WorldManager> Worlds { get; private set; }
+        internal List<WorldManager> Worlds { get; private set; }
 
         /// <summary>
         /// Gets a random number generator for the server.
@@ -94,32 +140,32 @@ namespace Chraft
         /// <summary>
         /// Thread safe list of all entities on the server.
         /// </summary>
-        private readonly List<EntityBase> _Entities = new List<EntityBase>();
+        private readonly ConcurrentDictionary<int, EntityBase> _Entities = new ConcurrentDictionary<int, EntityBase>();
 
         /// <summary>
         /// Gets the server Logger instance for console and file logging.
         /// </summary>
-        public Logger Logger { get; private set; }
+        internal Logger Logger { get; private set; }
 
         /// <summary>
         /// Gets user-chosen item names, numerics, and durabilities.
         /// </summary>
-        public ItemDb Items { get; private set; }
+        internal ItemDb Items { get; private set; }
 
         /// <summary>
         /// Gets a list of user-defined recipes known to the server.
         /// </summary>
-        public static Recipe[] Recipes { get; private set; }
+        internal static Recipe[] Recipes { get; private set; }
 
         /// <summary>
         /// Gets a list of user-defined smelting recipes known to the server.
         /// </summary>
-        public static SmeltingRecipe[] SmeltingRecipes { get; private set; }
+        internal static SmeltingRecipe[] SmeltingRecipes { get; private set; }
 
         /// <summary>
         /// Gets the IRC client, if it has been initialized.
         /// </summary>
-        public IrcClient Irc { get; private set; }
+        internal IrcClient Irc { get; private set; }
 
         /// <summary>
         /// Gets the server hash. Used for authentication, guaranteed to be unique between instances
@@ -131,26 +177,90 @@ namespace Chraft
         /// </summary>
         public bool UseOfficalAuthentication { get; private set; }
 
+        public int ClientsConnectionSlots;
+
+        
         public Server()
         {
-            ServerHash = Hash.MD5(Guid.NewGuid().ToByteArray());
-            UseOfficalAuthentication = Settings.Default.UseOfficalAuthentication;
-            Clients = new ConcurrentDictionary<int, Client>();
+            ChraftConfig.Load();
+            ClientsConnectionSlots = 30;
+            Packet.Role = StreamRole.Server;
             Rand = new Random();
-            Logger = new Logger(this, Settings.Default.LogFile);
-            PluginManager = new PluginManager(this, Settings.Default.PluginFolder);
-            Items = new ItemDb(Settings.Default.ItemsFile);
-            Recipes = Recipe.FromFile(Settings.Default.RecipesFile);
-            SmeltingRecipes = SmeltingRecipe.FromFile(Settings.Default.SmeltingRecipesFile);
+            ServerHash = GetRandomServerHash();
+            UseOfficalAuthentication = ChraftConfig.UseOfficalAuthentication;
+            Clients = new ConcurrentDictionary<int, Client>();
+            AuthClients = new ConcurrentDictionary<int, Client>();
+            Logger = new Logger(this, ChraftConfig.LogFile);
+            PluginManager = new PluginManager(this, ChraftConfig.PluginFolder);
+            Items = new ItemDb(ChraftConfig.ItemsFile);
+            Recipes = Recipe.FromXmlFile(ChraftConfig.RecipesFile);
+            SmeltingRecipes = SmeltingRecipe.FromFile(ChraftConfig.SmeltingRecipesFile);
             ClientCommandHandler = new ClientCommandHandler();
             ServerCommandHandler = new ServerCommandHandler();
-            if (Settings.Default.IrcEnabled)
+            if (ChraftConfig.IrcEnabled)
                 InitializeIrc();
+
+            PacketMap.Initialize();
 
             _AcceptEventArgs = new SocketAsyncEventArgs();
             _AcceptEventArgs.Completed += Accept_Completion;
 
             _Listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
+            for(int i = 0; i < 10; ++i)
+            {
+                MapChunkPacket.DeflaterPool.Push(new Deflater(5));
+            }
+
+            PlayersToSave = new ConcurrentQueue<Client>();
+            PlayersToSavePostponed = new ConcurrentQueue<Client>();
+            _generators = new Dictionary<string, IChunkGenerator>();
+        }
+
+        public IPluginManager GetPluginManager()
+        {
+            return PluginManager;
+        }
+
+        public IItemDb GetItemDb()
+        {
+            return Items;
+        }
+
+        public void AddChunkGenerator(string name, IChunkGenerator generator)
+        {
+            _generators.Add(name, generator);
+        }
+
+        internal IChunkGenerator GetChunkGenerator(string name)
+        {
+            if (_generators.Count == 0)
+                return null;
+
+            return _generators[name];
+        }
+
+        public ILogger GetLogger()
+        {
+            return Logger;
+        }
+
+        public IBlockHelper GetBlockHelper()
+        {
+            return BlockHelper.Instance;
+        }
+
+        public IMobFactory GetMobFactory()
+        {
+            return MobFactory.Instance;
+        }
+
+        internal string GetRandomServerHash()
+        {
+            byte[] bytes = new byte[7];
+            Rand.NextBytes(bytes);
+
+            return "23" + BitConverter.ToString(bytes).Replace("-", String.Empty);
         }
 
         public static Recipe[] GetRecipes()
@@ -167,8 +277,8 @@ namespace Chraft
 
         private void InitializeIrc()
         {
-            IPEndPoint ep = new IPEndPoint(Dns.GetHostEntry(Settings.Default.IrcServer).AddressList[0], Settings.Default.IrcPort);
-            Irc = new IrcClient(ep, Settings.Default.IrcNickname);
+            IPEndPoint ep = new IPEndPoint(Dns.GetHostEntry(ChraftConfig.IrcServer).AddressList[0], ChraftConfig.IrcPort);
+            Irc = new IrcClient(ep, ChraftConfig.IrcNickname);
             Irc.Received += new IrcEventHandler(Irc_Received);
         }
 
@@ -188,7 +298,7 @@ namespace Chraft
         private void OnIrcPrivMsg(object sender, IrcEventArgs e)
         {
             for (int i = 0; i < e.Args[1].Length; i++)
-                if (!Settings.Default.AllowedChatChars.Contains(e.Args[1][i]))
+                if (!ChraftConfig.AllowedChatChars.Contains(e.Args[1][i]))
                     return;
 
             Broadcast("§7[IRC] " + e.Prefix.Nickname + ":§f " + e.Args[1], sendToIrc: false);
@@ -198,7 +308,7 @@ namespace Chraft
         private void OnIrcNotice(object sender, IrcEventArgs e)
         {
             for (int i = 0; i < e.Args[1].Length; i++)
-                if (!Settings.Default.AllowedChatChars.Contains(e.Args[1][i]))
+                if (!ChraftConfig.AllowedChatChars.Contains(e.Args[1][i]))
                     return;
 
             Broadcast("§c[IRC] " + e.Prefix.Nickname + ":§f " + e.Args[1], sendToIrc: false);
@@ -207,18 +317,16 @@ namespace Chraft
 
         private void OnIrcWelcome(object sender, IrcEventArgs e)
         {
-            Irc.Join(Settings.Default.IrcChannel);
+            Irc.Join(ChraftConfig.IrcChannel);
         }
 
-        public void Run()
+        internal void Run()
         {
-            Logger.Log(Logger.LogLevel.Info, "Starting C#raft...");
+            Logger.Log(LogLevel.Info, "Starting C#raft...");
 
-
-            Worlds = new List<WorldManager>();
-            Worlds.Add(new WorldManager(this));
 
             PluginManager.LoadDefaultAssemblies();
+            Worlds = new List<WorldManager> { new WorldManager(this) };          
 
             // Player list update thread
             Thread t = new Thread(PlayerListProc);
@@ -231,17 +339,140 @@ namespace Chraft
                 Client.RecvSocketEventPool.Push(new SocketAsyncEventArgs());
             }
 
+            _globalTick = new Timer(GlobalTickProc, null, 50, 50);
+
             while (Running)
                 RunProc();
+        }
+
+        private int _globalTicks;
+
+        private void GlobalTickProc(object state)
+        {
+            ++_globalTicks;
+
+            foreach (WorldManager worldManager in Worlds)
+            {
+                worldManager.WorldTick();
+                worldManager.StartSaveProc(20 / Worlds.Count);
+            }
+
+            if ((_globalTicks % 10) == 0)
+                Task.Factory.StartNew(DoPulse);            
+            
+
+            if (NeedsFullSave)
+            {
+                FullSaving = true;
+                Task.Factory.StartNew(FullSave);
+            }
+            else if ((_globalTicks % 200) == 0 && (_playerSaveTask == null || _playerSaveTask.IsCompleted))
+            {
+                _playerSaveToken = new CancellationTokenSource();
+                var token = _playerSaveToken.Token;
+                _playerSaveTask = Task.Factory.StartNew(()=> SavePlayers(50, token), token);
+            }
+        }
+        
+        private void SavePlayers(int playersToSave, CancellationToken token)
+        {
+            if (token.IsCancellationRequested)
+                return;
+
+            int count = PlayersToSave.Count;
+
+            if (count > playersToSave)
+                count = playersToSave;
+
+            playersToSave -= count;
+            for (int i = 0; i < count && Running && !token.IsCancellationRequested; ++i)
+            {
+                Client client;
+                PlayersToSave.TryDequeue(out client);
+
+                if (client == null)
+                    continue;
+
+                /* Better to "signal" that the chunk can be queued again before saving, 
+                 * we don't know which signaled changes will be saved during the save */
+                Interlocked.Exchange(ref client.Owner.ChangesToSave, 0);
+
+                client.Save();
+            }
+
+            count = PlayersToSavePostponed.Count;
+
+            if (count > playersToSave)
+                count = playersToSave;
+
+            for (int i = 0; i < count && Running && !token.IsCancellationRequested; ++i)
+            {
+                Client client;
+                PlayersToSavePostponed.TryDequeue(out client);
+
+                if (client == null)
+                    continue;
+
+
+                if (client.Owner.ChangesToSave > 0 && client.Owner.EnqueuedForSaving > client.Owner.LastSaveTime)
+                {
+                    if ((DateTime.Now - client.Owner.LastSaveTime) > Chunk.SaveSpan)
+                    {
+                        PlayersToSavePostponed.Enqueue(client);
+                        continue;
+                    }
+                    /* Better to "signal" that the chunk can be queued again before saving, 
+                     * we don't know which signaled changes will be saved during the save */
+                    Interlocked.Exchange(ref client.Owner.ChangesToSave, 0);
+
+                    client.Save();
+                }
+            }
+            
+        }
+
+        private void FullSave()
+        {
+            foreach(WorldManager world in Worlds)
+            {
+                if (world.IsSaving())
+                    world.StopSave();
+
+
+                IChunk[] chunks = world.GetChunks();
+
+                world.ChunksToSave = new ConcurrentQueue<Chunk>();
+                world.ChunksToSavePostponed = new ConcurrentQueue<Chunk>();
+                foreach (Chunk chunk in chunks)
+                {
+                    chunk.ChangesToSave = 0;
+                    chunk.Save();
+                }
+            }
+
+            if (!_playerSaveTask.IsCompleted)
+                _playerSaveTask.Wait();
+
+            Client[] clients = GetClients() as Client[];
+
+            foreach(Client client in clients)
+            {
+                client.Owner.ChangesToSave = 0;
+                client.Save();
+            }
+
+            NeedsFullSave = false;
+            FullSaving = false;
         }
 
         private void PlayerListProc()
         {
             while (Running)
             {
-                foreach (var client in this.GetAuthenticatedClients())
+                Client[] authClients = GetAuthenticatedClients() as Client[];
+                foreach (var client in authClients)
                 {
-                    this.BroadcastToAuthenticated(new PlayerListItemPacket() { PlayerName = client.Owner.Username, Online = client.Owner.Ready, Ping = (short)client.Ping });
+                    this.BroadcastToAuthenticated(new PlayerListItemPacket() { PlayerName = client.Username, Online = client.Owner.Ready, Ping = (short)client.Ping });
                     Thread.Sleep(50);
                 }
                 Thread.Sleep(1000);
@@ -253,14 +484,14 @@ namespace Chraft
         /// </summary>
         /// <param name="name">The name of the folder to contain and identify the world.</param>
         /// <returns>The newly created world.</returns>
-        public WorldManager CreateWorld(string name)
+        internal WorldManager CreateWorld(string name)
         {
 
             WorldManager world = new WorldManager(this);
 
             //Event
             WorldCreatedEventArgs e = new WorldCreatedEventArgs(world);
-            PluginManager.CallEvent(Event.WORLD_CREATE, e);
+            PluginManager.CallEvent(Event.WorldCreate, e);
             if (e.EventCanceled) return null;
             //End Event
 
@@ -272,11 +503,11 @@ namespace Chraft
 
         private void RunProc()
         {
-            Logger.Log(Logger.LogLevel.Info, "Using IP Addresss {0}.", Settings.Default.IPAddress);
-            Logger.Log(Logger.LogLevel.Info, "Listening on port {0}.", Settings.Default.Port);
+            Logger.Log(LogLevel.Info, "Using IP Address {0}.", ChraftConfig.IPAddress);
+            Logger.Log(LogLevel.Info, "Listening on port {0}.", ChraftConfig.Port);
 
-            IPAddress address = IPAddress.Parse(Settings.Default.IPAddress);
-            IPEndPoint ipEndPoint = new IPEndPoint(address, Settings.Default.Port);
+            IPAddress address = IPAddress.Parse(ChraftConfig.IPAddress);
+            IPEndPoint ipEndPoint = new IPEndPoint(address, ChraftConfig.Port);
 
             _Listener.Bind(ipEndPoint);
             _Listener.Listen(5);
@@ -285,12 +516,12 @@ namespace Chraft
 
             if (Running)
             {
-                Logger.Log(Logger.LogLevel.Info, "Waiting one second before restarting network.");
+                Logger.Log(LogLevel.Info, "Waiting one second before restarting network.");
                 Thread.Sleep(1000);
             }
         }
 
-        public static void ProcessSendQueue()
+        internal static void ProcessSendQueue()
         {
             int count = SendClientQueue.Count;
 
@@ -300,7 +531,7 @@ namespace Chraft
                 if (!SendClientQueue.TryDequeue(out client))
                     return;
 
-                if(!client.Running)
+                if (!client.Running)
                 {
                     client.DisposeSendSystem();
                     return;
@@ -310,7 +541,7 @@ namespace Chraft
             });
         }
 
-        public static void ProcessReadQueue()
+        internal static void ProcessReadQueue()
         {
             int count = RecvClientQueue.Count;
 
@@ -320,14 +551,14 @@ namespace Chraft
                 if (!RecvClientQueue.TryDequeue(out client))
                     return;
 
-                if(!client.Running)
+                if (!client.Running)
                     return;
-                
+
                 Interlocked.Exchange(ref client.TimesEnqueuedForRecv, 0);
                 ByteQueue bufferToProcess = client.GetBufferToProcess();
 
                 int length = client.FragPackets.Size + bufferToProcess.Size;
-                while(length > 0)
+                while (length > 0)
                 {
                     byte packetType = 0;
 
@@ -336,27 +567,27 @@ namespace Chraft
                     else
                         packetType = bufferToProcess.GetPacketID();
 
-                    //client.Logger.Log(Chraft.Logger.LogLevel.Info, "Reading packet {0}", ((PacketType)packetType).ToString());
+                    //client.Logger.Log(Chraft.LogLevel.Info, "Reading packet {0}", ((PacketType)packetType).ToString());
 
                     PacketHandler handler = PacketHandlers.GetHandler((PacketType)packetType);
 
-                    if(handler == null)
+                    if (handler == null)
                     {
                         byte[] unhandledPacketData = GetBufferToBeRead(bufferToProcess, client, length);
-                        
-                        // TODO: handle this case, writing on the console a warning and/or writing it plus the bytes on a log
-                        client.Logger.Log(Chraft.Logger.LogLevel.Caution, "Unhandled packet arrived, id: {0}", unhandledPacketData[0]);
 
-                        client.Logger.Log(Chraft.Logger.LogLevel.Warning, "Data:\r\n {0}", BitConverter.ToString(unhandledPacketData, 1));
+                        // TODO: handle this case, writing on the console a warning and/or writing it plus the bytes on a log
+                        client.Logger.Log(LogLevel.Caution, "Unhandled packet arrived, id: {0}", unhandledPacketData[0]);
+
+                        client.Logger.Log(LogLevel.Warning, "Data:\r\n {0}", BitConverter.ToString(unhandledPacketData, 1));
                         length = 0;
                     }
-                    else if(handler.Length == 0)
+                    else if (handler.Length == 0)
                     {
                         byte[] data = GetBufferToBeRead(bufferToProcess, client, length);
 
                         if (length >= handler.MinimumLength)
                         {
-                            PacketReader reader = new PacketReader(data, length, StreamRole.Server);
+                            PacketReader reader = new PacketReader(data, length);
 
                             handler.OnReceive(client, reader);
 
@@ -373,21 +604,24 @@ namespace Chraft
                             }
                         }
                         else
+                        {
                             EnqueueFragment(client, data);
-                        
+                            length = 0;
+                        }
+
                     }
                     else if (length >= handler.Length)
                     {
                         byte[] data = GetBufferToBeRead(bufferToProcess, client, handler.Length);
 
-                        PacketReader reader = new PacketReader(data, handler.Length, StreamRole.Server);
+                        PacketReader reader = new PacketReader(data, handler.Length);
 
                         handler.OnReceive(client, reader);
 
-                        // If we failed it's because the packet isn't complete
+                        // If we failed it's because the packet is wrong
                         if (reader.Failed)
                         {
-                            EnqueueFragment(client, data);
+                            client.MarkToDispose();
                             length = 0;
                         }
                         else
@@ -431,9 +665,9 @@ namespace Chraft
 
             client.FragPackets.Dequeue(data, 0, fromFrag);
 
-            int fromProcessed = length - fromFrag; 
-            
-            processedBuffer.Dequeue(data, 0, fromProcessed);
+            int fromProcessed = length - fromFrag;
+
+            processedBuffer.Dequeue(data, fromFrag, fromProcessed);
 
             return data;
         }
@@ -456,41 +690,31 @@ namespace Chraft
         }
 
         public AutoResetEvent NetworkSignal = new AutoResetEvent(true);
-        private int _AsyncAccepts = 0;
-        private Task _ReadClientsPackets;
-        private Task _SendClientPackets;
-        private Task _DisposeClients;
+        private int _asyncAccepts = 0;
+        private Task _readClientsPackets;
+        private Task _sendClientPackets;
+        private Task _disposeClients;
 
         private void RunNetwork()
         {
             while (NetworkSignal.WaitOne())
             {
-                int accepts = Interlocked.CompareExchange(ref _AsyncAccepts, 1, 0);
+                if (TryTakeConnectionSlot())
+                    _Listener.AcceptAsync(_AcceptEventArgs);               
 
-                if (accepts == 0)
+                if (!RecvClientQueue.IsEmpty && (_readClientsPackets == null || _readClientsPackets.IsCompleted))
                 {
-                    //Logger.Log(Chraft.Logger.LogLevel.Info, "Starting async accept");
-                    _AcceptEventArgs.AcceptSocket = null;
-                    _Listener.AcceptAsync(_AcceptEventArgs);
+                    _readClientsPackets = Task.Factory.StartNew(ProcessReadQueue);
                 }
 
-                if (RecvClientQueue.Count > 0 && (_ReadClientsPackets == null || _ReadClientsPackets.IsCompleted))
+                if (!ClientsToDispose.IsEmpty && (_disposeClients == null || _disposeClients.IsCompleted))
                 {
-                    //Logger.Log(Chraft.Logger.LogLevel.Info, "Starting ProcessReadQueue");
-                    _ReadClientsPackets = new Task(ProcessReadQueue);
-                    _ReadClientsPackets.Start();
+                    _disposeClients = Task.Factory.StartNew(DisposeClients);
                 }
 
-                if(ClientsToDispose.Count > 0 && (_DisposeClients == null || _DisposeClients.IsCompleted))
+                if (!SendClientQueue.IsEmpty && (_sendClientPackets == null || _sendClientPackets.IsCompleted))
                 {
-                    _DisposeClients = new Task(DisposeClients);
-                    _DisposeClients.Start();
-                }
-
-                if(SendClientQueue.Count > 0 && (_SendClientPackets == null || _SendClientPackets.IsCompleted))
-                {
-                    _SendClientPackets = new Task(ProcessSendQueue);
-                    _SendClientPackets.Start();
+                    _sendClientPackets = Task.Factory.StartNew(ProcessSendQueue);
                 }
             }
         }
@@ -498,7 +722,7 @@ namespace Chraft
         private void DisposeClients()
         {
             int count = ClientsToDispose.Count;
-            while (ClientsToDispose.Count > 0)
+            while (!ClientsToDispose.IsEmpty)
             {
                 Client client;
                 if (!ClientsToDispose.TryDequeue(out client))
@@ -508,48 +732,75 @@ namespace Chraft
             }
         }
 
+        internal void FreeConnectionSlot()
+        {
+            //Logger.Log(LogLevel.Info, "FreeingSlot ");
+            Interlocked.Increment(ref ClientsConnectionSlots);
+            NetworkSignal.Set();
+        }
+
+        internal bool TryTakeConnectionSlot()
+        {            
+            int accepts = Interlocked.Exchange(ref _asyncAccepts, 1);           
+            if (accepts == 0)
+            {
+                int count = Interlocked.Decrement(ref ClientsConnectionSlots);
+
+                if (count >= 0)
+                    return true;
+
+                _asyncAccepts = 0;
+
+                Interlocked.Increment(ref ClientsConnectionSlots);
+            }          
+           
+            return false;
+            
+        }
+
         private void Accept_Process(SocketAsyncEventArgs e)
         {
             if (OnBeforeAccept(e.AcceptSocket))
             {
-                Client c = new Client(e.AcceptSocket, new Player(this, AllocateEntity()));
+                Interlocked.Increment(ref NextSessionId);
+                Client c = new Client(NextSessionId, this, e.AcceptSocket);
                 //Event
                 ClientAcceptedEventArgs args = new ClientAcceptedEventArgs(this, c);
-                PluginManager.CallEvent(Event.SERVER_ACCEPT, args);
+                PluginManager.CallEvent(Event.ServerAccept, args);
                 //Do not check for EventCanceled because that could make this unstable.
                 //End Event
 
-                lock (Clients)
-                {
-                    AddClient(c);
-                    Logger.Log(Chraft.Logger.LogLevel.Info, "Clients online: {0}", Clients.Count);
-                }
-                AddEntity(c.Owner);
                 c.Start();
-                Logger.Log(Chraft.Logger.LogLevel.Info, "Starting client");
+                
+                AddClient(c);
+                Logger.Log(LogLevel.Info, "Clients online: {0}", Clients.Count);
+                                
+                Logger.Log(LogLevel.Info, "Starting client");
                 OnJoined(c);
             }
             else
             {
+                if (e.AcceptSocket.Connected)
+                    e.AcceptSocket.Shutdown(SocketShutdown.Both);
                 e.AcceptSocket.Close();
             }
-
-            Interlocked.Exchange(ref _AsyncAccepts, 0);
+            _AcceptEventArgs.AcceptSocket = null;
+            Interlocked.Exchange(ref _asyncAccepts, 0);
             NetworkSignal.Set();
         }
 
         private void Accept_Completion(object sender, SocketAsyncEventArgs e)
         {
-            Accept_Process(e); 
+            Accept_Process(e);
         }
 
         /// <summary>
         /// Allocate a new entity ID.
         /// </summary>
         /// <returns>A new entity ID reserved for a new entity.</returns>
-        public int AllocateEntity()
+        internal int AllocateEntity()
         {
-            return NextEntityId++;
+            return Interlocked.Increment(ref NextSessionId);
         }
 
         /// <summary>
@@ -557,17 +808,17 @@ namespace Chraft
         /// </summary>
         /// <param name="message">The message to be broadcasted.</param>
         /// <param name="excludeClient">The client to excluded; usually the sender.</param>
-        public void Broadcast(string message, Client excludeClient = null, bool sendToIrc = true)
+        public void Broadcast(string message, IClient excludeClient = null, bool sendToIrc = true)
         {
             //Event
             ServerBroadcastEventArgs e = new ServerBroadcastEventArgs(this, message, excludeClient);
-            PluginManager.CallEvent(Event.SERVER_BROADCAST, e);
+            PluginManager.CallEvent(Event.ServerBroadcast, e);
             if (e.EventCanceled) return;
             message = e.Message;
             excludeClient = e.ExcludeClient;
             //End Event
 
-            foreach (Client c in GetClients())
+            foreach (Client c in GetAuthenticatedClients())
             {
                 if (c != excludeClient)
                     c.SendMessage(message);
@@ -575,7 +826,37 @@ namespace Chraft
 
             if (sendToIrc && Irc != null)
             {
-                Irc.WriteLine("PRIVMSG {0} :{1}", Settings.Default.IrcChannel, message.Replace('§', '\x3'));
+                Irc.WriteLine("PRIVMSG {0} :{1}", ChraftConfig.IrcChannel, message.Replace('§', '\x3'));
+            }
+        }
+
+        /// <summary>
+        /// Broadcasts a message to all clients, optionally excluding the sender.
+        /// </summary>
+        /// <param name="message">The message to be broadcasted.</param>
+        /// <param name="excludeClient">The client to excluded; usually the sender.</param>
+        public void BroadcastSync(string message, IClient excludeClient = null, bool sendToIrc = true)
+        {
+            //Event
+            ServerBroadcastEventArgs e = new ServerBroadcastEventArgs(this, message, excludeClient);
+            PluginManager.CallEvent(Event.ServerBroadcast, e);
+            if (e.EventCanceled) return;
+            message = e.Message;
+            excludeClient = e.ExcludeClient;
+            //End Event
+
+            foreach (Client c in GetAuthenticatedClients())
+            {
+                if (c != excludeClient)
+                {
+                    ChatMessagePacket cm = new ChatMessagePacket { Message = message };
+                    c.Send_Sync_Packet(cm);
+                }
+            }
+
+            if (sendToIrc && Irc != null)
+            {
+                Irc.WriteLine("PRIVMSG {0} :{1}", ChraftConfig.IrcChannel, message.Replace('§', '\x3'));
             }
         }
 
@@ -584,9 +865,17 @@ namespace Chraft
         /// </summary>
         /// <param name="packet">The packet to be broadcasted.</param>
         /// <param name="excludeClient">The client to excluded; usually the sender.</param>
-        public void Broadcast(Packet packet, Client excludeClient = null)
+        internal void Broadcast(Packet packet, IClient iExcludeClient = null)
         {
-            foreach (Client c in GetClients())
+            Client[] clients = GetClients() as Client[];
+
+            if (clients.Length == 0)
+                return;
+
+            packet.SetShared(Logger, clients.Length);
+
+            Client excludeClient = iExcludeClient as Client;
+            foreach (Client c in clients)
             {
                 if (excludeClient == null || c.Owner.EntityId != excludeClient.Owner.EntityId)
                     c.SendPacket(packet);
@@ -597,113 +886,352 @@ namespace Chraft
         /// Broadcasts a packet to all authenticated clients
         /// </summary>
         /// <param name="packet"></param>
-        public void BroadcastToAuthenticated(Packet packet)
+        internal void BroadcastToAuthenticated(Packet packet)
         {
-            System.Threading.Tasks.Parallel.ForEach(this.GetAuthenticatedClients(), (client) => client.SendPacket(packet));
+            Client[] authClients = GetAuthenticatedClients() as Client[];
+
+            if (authClients.Length == 0)
+                return;
+
+            packet.SetShared(Logger, authClients.Length);
+            Parallel.ForEach(authClients, (client) => client.SendPacket(packet));
         }
 
-        private Client[] _ClientsCache;
-        private int _ClientListChanges;
+        public void BroadcastTimeUpdate(IWorldManager world)
+        {
+            Client[] authClients = GetAuthenticatedClients() as Client[];
+
+            if (authClients.Length == 0)
+                return;
+
+            TimeUpdatePacket packet = new TimeUpdatePacket {Time = world.Time};
+            packet.SetShared(Logger, authClients.Length);
+            Parallel.ForEach(authClients, (client) => client.SendPacket(packet));
+        }
+
+        private Client[] _clientsCache;
+        private int _clientDictChanges;
 
         /// <summary>
         /// Gets a thread-safe array of connected clients.
         /// </summary>
         /// <returns>A thread-safe array of connected clients.</returns>
-        public Client[] GetClients()
+        public IClient[] GetClients()
         {
-            int changes = Interlocked.Exchange(ref _ClientListChanges, 0);
-            if (_ClientsCache == null || changes > 0)
-             _ClientsCache =  Clients.Values.ToArray();
+            int changes = Interlocked.Exchange(ref _clientDictChanges, 0);
+            if (_clientsCache == null || changes > 0)
+                _clientsCache = Clients.Values.ToArray();
 
-            return _ClientsCache;
+            return _clientsCache;
         }
 
-        // TODO: cache this thing?
-        public IEnumerable<Client> GetAuthenticatedClients()
+        private Client[] _authClientsCache;
+        private int _authClientDictChanges;
+
+        public IClient[] GetAuthenticatedClients()
         {
-            return GetClients().Where((client) => !String.IsNullOrEmpty(client.Owner.Username) && client.Owner.Ready);
+            int changes = Interlocked.Exchange(ref _authClientDictChanges, 0);
+            if (_authClientsCache == null || changes > 0)
+                _authClientsCache = AuthClients.Values.ToArray();
+
+            return _authClientsCache;
         }
 
 
-        public IEnumerable<Client> GetClients(string name)
+        public IEnumerable<IClient> GetClients(string name)
         {
-            return from c in GetAuthenticatedClients()
-                   where c.Owner.Username.ToLower().Contains(name.ToLower()) || c.Owner.DisplayName.ToLower().Contains(name.ToLower())
+
+            return from c in (GetAuthenticatedClients() as Client[])
+                   where c.Username.ToLower().Contains(name.ToLower()) || c.Owner.DisplayName.ToLower().Contains(name.ToLower())
                    select c;
         }
+
+        private EntityBase[] _entityCache;
+        private int _entityDictChanges;
 
         /// <summary>
         /// Gets a thread-safe array of all entities, including clients.
         /// </summary>
         /// <returns>A thread-safe array of all active entities.</returns>
-        public EntityBase[] GetEntities()
+        public IEntityBase[] GetEntities()
         {
-            lock (_Entities)
-            {
-                return _Entities.ToArray();
-            }
+            int changes = Interlocked.Exchange(ref _entityDictChanges, 0);
+
+            if (_entityCache == null || changes > 0)
+                _entityCache = _Entities.Values.ToArray();
+
+            return _entityCache;
         }
 
         /// <summary>
         /// Thread-friendly way of removing server entities
         /// </summary>
-        public void RemoveEntity(EntityBase e)
+        public void RemoveEntity(IEntityBase iEntity, bool notifyNearbyClients = true)
         {
-            lock (_Entities)
-            {
-                _Entities.Remove(e);
-            }
+            EntityBase entity = iEntity as EntityBase;
+            if (notifyNearbyClients)
+                SendRemoveEntityToNearbyPlayers(entity.World, entity);
+
+            _Entities.TryRemove(entity.EntityId, out entity);
+            Interlocked.Increment(ref _entityDictChanges);
         }
 
         /// <summary>
         /// Thread-friendly way of adding server entities
         /// </summary>
-        public void AddEntity(EntityBase e)
+        public void AddEntity(IEntityBase iEntity, bool notifyNearbyClients = true)
         {
-            lock (_Entities)
+            EntityBase entity = iEntity as EntityBase;
+            _Entities.TryAdd(entity.EntityId, entity);
+            Interlocked.Increment(ref _entityDictChanges);
+            if (notifyNearbyClients)
+                SendEntityToNearbyPlayers(entity.World, entity);    
+        }
+
+        public void AddClient(IClient iClient)
+        {
+            Client client = iClient as Client;
+            Clients.TryAdd(client.SessionID, client);
+            Interlocked.Increment(ref _clientDictChanges);
+        }
+
+        public void RemoveClient(IClient iClient)
+        {
+            Client client = iClient as Client;
+            Clients.TryRemove(client.SessionID, out client);
+            Interlocked.Increment(ref _clientDictChanges);
+        }
+
+        public void AddAuthenticatedClient(IClient iClient)
+        {
+            Client client = iClient as Client;
+            AuthClients.TryAdd(client.SessionID, client);
+            Interlocked.Increment(ref _authClientDictChanges);
+        }
+
+        public void RemoveAuthenticatedClient(IClient iClient)
+        {
+            Client client = iClient as Client;
+            Client removed;
+            AuthClients.TryRemove(client.SessionID, out removed);
+            Interlocked.Increment(ref _authClientDictChanges);
+
+            RemoveClient(client);
+        }
+
+        public Packet GetSpawnPacket(EntityBase entity)
+        {
+            Packet packet = null;
+            if (entity is Player)
             {
-                _Entities.Add(e);
+                Player p = ((Player)entity);
+
+                packet = new NamedEntitySpawnPacket
+                {
+                    EntityId = p.EntityId,
+                    X = p.Position.X,
+                    Y = p.Position.Y,
+                    Z = p.Position.Z,
+                    Yaw = p.PackedYaw,
+                    Pitch = p.PackedPitch,
+                    PlayerName = p.Client.Username + p.EntityId,
+                    CurrentItem = 0
+                };
             }
+            else if (entity is ItemEntity)
+            {
+                ItemEntity item = (ItemEntity)entity;
+                packet = new SpawnItemPacket
+                {
+                    X = item.Position.X,
+                    Y = item.Position.Y,
+                    Z = item.Position.Z,
+                    Yaw = item.PackedYaw,
+                    Pitch = item.PackedPitch,
+                    EntityId = item.EntityId,
+                    ItemId = item.ItemId,
+                    Count = item.Count,
+                    Durability = item.Durability,
+                    Roll = 0
+                };
+            }
+            else if (entity is Mob)
+            {
+                Mob mob = (Mob)entity;
+                Logger.Log(LogLevel.Debug, ("ClientSpawn: Sending Mob " + mob.Type + " (" + mob.Position.X + ", " + mob.Position.Y + ", " + mob.Position.Z + ")"));
+                packet = new MobSpawnPacket
+                {
+                    X = mob.Position.X,
+                    Y = mob.Position.Y,
+                    Z = mob.Position.Z,
+                    Yaw = mob.PackedYaw,
+                    Pitch = mob.PackedPitch,
+                    EntityId = mob.EntityId,
+                    Type = mob.Type,
+                    Data = mob.Data
+                };
+            }
+
+            return packet;
         }
 
-        public void AddClient(Client client)
-        {
-            Clients.TryAdd(client.Owner.SessionID, client);
-            Interlocked.Increment(ref _ClientListChanges);
-        }
-
-        public void RemoveClient(Client client)
-        {
-            Clients.TryRemove(client.Owner.SessionID, out client);
-            Interlocked.Increment(ref _ClientListChanges);
-        }
-
+        // TODO: This should be removed in favor of the one below
         /// <summary>
         /// Sends a packet in parallel to each nearby player.
         /// </summary>
         /// <param name="world">The world containing the coordinates.</param>
         /// <param name="absCoords>The center coordinates.</param>
         /// <param name="packet">The packet to send</param>
-        public void SendPacketToNearbyPlayers(WorldManager world, AbsWorldCoords absCoords, Packet packet)
+        internal void SendPacketToNearbyPlayers(WorldManager world, AbsWorldCoords absCoords, Packet packet)
         {
-            Parallel.ForEach(this.GetNearbyPlayers(world, absCoords), (client) =>
+            Client[] nearbyClients = GetNearbyPlayersInternal(world, UniversalCoords.FromAbsWorld(absCoords)).ToArray();      
+
+            if (nearbyClients.Length == 0)
+                return;
+
+            packet.SetShared(Logger, nearbyClients.Length);
+            Parallel.ForEach(nearbyClients, (client) =>
             {
                 client.SendPacket(packet);
             });
         }
 
         /// <summary>
+        /// Sends a packet in parallel to each nearby player.
+        /// </summary>
+        /// <param name="world">The world containing the coordinates.</param>
+        /// <param name="coords">The center coordinates.</param>
+        /// <param name="packet">The packet to send</param>
+        internal void SendPacketToNearbyPlayers(WorldManager world, UniversalCoords coords, Packet packet, Client excludedClient = null)
+        {
+            Client[] nearbyClients = GetNearbyPlayersInternal(world, coords).ToArray();
+
+            if (nearbyClients.Length == 0)
+                return;
+
+            packet.SetShared(Logger, nearbyClients.Length);
+
+            Parallel.ForEach(nearbyClients, (client) =>
+            {
+                if (excludedClient != client)
+                    client.SendPacket(packet);
+                else
+                    packet.Release();
+            });
+        }
+
+        /// <summary>
+        /// Sends packets in parallel to each nearby player.
+        /// </summary>
+        /// <param name="world">The world containing the coordinates.</param>
+        /// <param name="coords">The center coordinates.</param>
+        /// <param name="packets">The list of packets to send</param>
+        internal void SendPacketsToNearbyPlayers(WorldManager world, UniversalCoords coords, List<Packet> packets, Client excludedClient = null)
+        {
+            Client[] nearbyClients = GetNearbyPlayersInternal(world, coords).ToArray();
+
+            if (nearbyClients.Length == 0)
+                return;
+
+            foreach (Packet packet in packets)
+                packet.SetShared(Logger, nearbyClients.Length);
+
+            Parallel.ForEach(nearbyClients, (client) =>
+            {
+                if (excludedClient != client)
+                {
+                    foreach (Packet packet in packets)
+                        client.SendPacket(packet);
+                }
+                else
+                {
+                    foreach (Packet packet in packets)
+                        packet.Release();
+                }
+            });
+        }
+
+        public void SendEntityToNearbyPlayers(IWorldManager world, IEntityBase iEntity)
+        {
+            Packet packet;
+            EntityBase entity = iEntity as EntityBase;
+            if ((packet = (GetSpawnPacket(entity) as Packet)) != null)
+            {
+                if (packet is NamedEntitySpawnPacket)
+                {
+                    List<Packet> packets = new List<Packet> { packet };
+                    for (short i = 0; i < 5; i++)
+                    {
+                        packets.Add(new EntityEquipmentPacket
+                        {
+                            EntityId = entity.EntityId,
+                            Slot = i,
+                            ItemId = -1,
+                            Durability = 0
+                        });
+                    }
+
+                    SendPacketsToNearbyPlayers(world as WorldManager, UniversalCoords.FromAbsWorld(entity.Position), packets,
+                                          entity is Player ? ((Player)entity).Client : null);
+                }
+                else
+                    SendPacketToNearbyPlayers(world as WorldManager, UniversalCoords.FromAbsWorld(entity.Position), packet,
+                                          entity is Player ? ((Player)entity).Client : null);
+            }
+
+            else if (entity is TileEntity)
+            {
+
+            }
+            else
+            {
+                List<Packet> packets = new List<Packet> { new CreateEntityPacket { EntityId = entity.EntityId }, new EntityTeleportPacket { EntityId = entity.EntityId, Pitch = entity.PackedPitch, Yaw = entity.PackedYaw, X = entity.Position.X, Y = entity.Position.Y, Z = entity.Position.Z } };
+                SendPacketsToNearbyPlayers(world as WorldManager, UniversalCoords.FromAbsWorld(entity.Position), packets);
+            }
+
+        }
+
+        public void SendRemoveEntityToNearbyPlayers(IWorldManager world, IEntityBase entity)
+        {
+            SendPacketToNearbyPlayers(world as WorldManager, UniversalCoords.FromAbsWorld(entity.Position), new DestroyEntityPacket { EntityId = entity.EntityId }, entity is Player ? ((Player)entity).Client : null);
+        }
+
+        // TODO: This should be removed in favor of the one below
+        /// <summary>
         /// Yields an enumerable of nearby players, thread-safe.
         /// </summary>
         /// <param name="world">The world containing the coordinates.</param>
         /// <param name="absCoords">The center coordinates.</param>
         /// <returns>A lazy enumerable of nearby players.</returns>
-        public IEnumerable<Client> GetNearbyPlayers(WorldManager world, AbsWorldCoords absCoords)
+        /*public IEnumerable<Client> GetNearbyPlayers(WorldManager world, AbsWorldCoords absCoords)
         {
-            int radius = Settings.Default.SightRadius << 4;
+            int radius = ChraftConfig.SightRadius << 4;
             foreach (Client c in GetAuthenticatedClients())
             {
-                if (c.Owner.World == world && Math.Abs(absCoords.X - c.Owner.Position.X) <= radius && Math.Abs(absCoords.Y - c.Owner.Position.Y) <= radius && Math.Abs(absCoords.Z - c.Owner.Position.Z) <= radius)
+                if (c.Owner.World == world && Math.Abs(absCoords.X - c.Owner.Position.X) <= radius && Math.Abs(absCoords.Z - c.Owner.Position.Z) <= radius)
+                    yield return c;
+            }
+        }*/
+       
+        public IEnumerable<IClient> GetNearbyPlayers(IWorldManager world, UniversalCoords coords)
+        {
+            return GetNearbyPlayersInternal(world as WorldManager, coords);
+        }
+
+        /// <summary>
+        /// Yields an enumerable of nearby players, thread-safe.
+        /// </summary>
+        /// <param name="world">The world containing the coordinates.</param>
+        /// <param name="coords">The center coordinates.</param>
+        /// <returns>A lazy enumerable of nearby players.</returns>
+        internal IEnumerable<Client> GetNearbyPlayersInternal(WorldManager world, UniversalCoords coords)
+        {
+            int radius = ChraftConfig.SightRadius;
+            foreach (Client c in GetAuthenticatedClients())
+            {
+                int playerChunkX = (int)Math.Floor(c.Owner.Position.X) >> 4;
+                int playerChunkZ = (int)Math.Floor(c.Owner.Position.Z) >> 4;
+                if (c.Owner.World == world && Math.Abs(coords.ChunkX - playerChunkX) <= radius && Math.Abs(coords.ChunkZ - playerChunkZ) <= radius)
                     yield return c;
             }
         }
@@ -716,16 +1244,113 @@ namespace Chraft
         /// <param name="y">The center Y coordinate.</param>
         /// <param name="z">The center Z coordinate.</param>
         /// <returns>A lazy enumerable of nearby entities.</returns>
-        public IEnumerable<EntityBase> GetNearbyEntities(WorldManager world, AbsWorldCoords coords)
+        /*public IEnumerable<EntityBase> GetNearbyEntities(WorldManager world, AbsWorldCoords coords)
         {
-            int radius = Settings.Default.SightRadius << 4;
+            int radius = ChraftConfig.SightRadius << 4;
             foreach (EntityBase e in GetEntities())
             {
                 if (e.World == world && Math.Abs(coords.X - e.Position.X) <= radius && Math.Abs(coords.Y - e.Position.Y) <= radius && Math.Abs(coords.Z - e.Position.Z) <= radius)
                     yield return e;
             }
+        }*/
+
+        /// <summary>
+        /// Yields an enumerable of nearby entities, including players.  Thread-safe.
+        /// </summary>
+        /// <param name="world">The world containing the coordinates.</param>
+        /// <param name="x">The center X coordinate.</param>
+        /// <param name="y">The center Y coordinate.</param>
+        /// <param name="z">The center Z coordinate.</param>
+        /// <returns>A lazy enumerable of nearby entities.</returns>
+        internal IEnumerable<EntityBase> GetNearbyEntitiesInternal(WorldManager world, UniversalCoords coords)
+        {
+            int radius = ChraftConfig.SightRadius;
+
+            foreach (EntityBase e in GetEntities())
+            {
+                int entityChunkX = (int)Math.Floor(e.Position.X) >> 4;
+                int entityChunkZ = (int)Math.Floor(e.Position.Z) >> 4;
+
+                if (e.World == world && Math.Abs(coords.ChunkX - entityChunkX) <= radius && Math.Abs(coords.ChunkZ - entityChunkZ) <= radius)
+                    yield return e;
+            }
         }
-        
+
+        public IEnumerable<IEntityBase> GetNearbyEntities(IWorldManager world, UniversalCoords coords)
+        {
+            return GetNearbyEntitiesInternal(world as WorldManager, coords);
+        }
+       
+
+        /// <summary>
+        /// Yields an enumerable of nearby entities, including players.  Thread-safe.
+        /// </summary>
+        /// <param name="world">The world containing the coordinates.</param>
+        /// <param name="x">The center X coordinate.</param>
+        /// <param name="y">The center Y coordinate.</param>
+        /// <param name="z">The center Z coordinate.</param>
+        /// <returns>A lazy enumerable of nearby entities.</returns>
+        public Dictionary<int, IEntityBase> GetNearbyEntitiesDict(IWorldManager world, UniversalCoords coords)
+        {
+            int radius = ChraftConfig.SightRadius;
+
+            Dictionary<int, IEntityBase> dict = new Dictionary<int, IEntityBase>();
+
+            foreach (EntityBase e in GetEntities())
+            {
+                int entityChunkX = (int)Math.Floor(e.Position.X) >> 4;
+                int entityChunkZ = (int)Math.Floor(e.Position.Z) >> 4;
+
+                if (e.World == world && Math.Abs(coords.ChunkX - entityChunkX) <= radius && Math.Abs(coords.ChunkZ - entityChunkZ) <= radius)
+                {
+                    dict.Add(e.EntityId, e);
+                }
+            }
+
+            return dict;
+        }
+
+        public IEntityBase GetEntityById(int id)
+        {
+            EntityBase entity;
+            _Entities.TryGetValue(id, out entity);
+
+            return entity;
+        }
+
+        /*public IEnumerable<IEntityBase> GetNearbyLivings(IWorldManager world, AbsWorldCoords coords)
+        {
+            int radius = ChraftConfig.SightRadius << 4;
+            foreach (EntityBase entity in GetEntities())
+            {
+                if (!(entity is LivingEntity))
+                    continue;
+
+                if (entity.World == world && Math.Abs(coords.X - entity.Position.X) <= radius && Math.Abs(coords.Y - entity.Position.Y) <= radius && Math.Abs(coords.Z - entity.Position.Z) <= radius)
+                    yield return (entity as LivingEntity);
+            }
+        }*/
+
+        internal IEnumerable<LivingEntity> GetNearbyLivingsInternal(WorldManager world, UniversalCoords coords)
+        {
+            int radius = ChraftConfig.SightRadius;
+            foreach (EntityBase entity in GetEntities())
+            {
+                if (!(entity is LivingEntity))
+                    continue;
+                int entityChunkX = (int)Math.Floor(entity.Position.X) >> 4;
+                int entityChunkZ = (int)Math.Floor(entity.Position.Z) >> 4;
+
+                if (entity.World == world && Math.Abs(coords.ChunkX - entityChunkX) <= radius && Math.Abs(coords.ChunkZ - entityChunkZ) <= radius)
+                    yield return (entity as LivingEntity);
+            }
+        }
+
+        public IEnumerable<ILivingEntity> GetNearbyLivings(IWorldManager world, UniversalCoords coords)
+        {
+            return GetNearbyLivingsInternal(world as WorldManager, coords);
+        }
+
         /// <summary>
         /// Yields an enumerable of entities where their BoundingBox intersects with <paramref name="boundingBox"/>
         /// </summary>
@@ -735,22 +1360,12 @@ namespace Chraft
         /// <param name='boundingBox'>
         /// Bounding box.
         /// </param>
-        public IEnumerable<EntityBase> GetEntitiesWithinBoundingBox(BoundingBox boundingBox)
+        public IEnumerable<IEntityBase> GetEntitiesWithinBoundingBox(BoundingBox boundingBox)
         {
-            return from e in GetEntities()
+            EntityBase[] entities = GetEntities() as EntityBase[];
+            return from e in entities
                    where e.BoundingBox.IntersectsWith(boundingBox)
                    select e;
-        }
-
-        /// <summary>
-        /// Drops an item based on the given player's position and rotation.
-        /// </summary>
-        /// <param name="client">The client to be used for position calculations.</param>
-        /// <param name="stack">The stack to be dropped.</param>
-        /// <returns>The entity ID of the item drop.</returns>
-        public int DropItem(Client client, ItemStack stack)
-        {
-            return DropItem(client.Owner.World, UniversalCoords.FromWorld(client.Owner.Position.X, client.Owner.Position.Y, client.Owner.Position.Z), stack);
         }
 
         /// <summary>
@@ -759,32 +1374,44 @@ namespace Chraft
         /// <param name="player">The player to be used for position calculations.</param>
         /// <param name="stack">The stack to be dropped.</param>
         /// <returns>The entity ID of the item drop.</returns>
-        public int DropItem(Player player, ItemStack stack)
+        public int DropItem(IPlayer player, IItemStack stack)
         {
             //todo - proper drop
-            return DropItem(player.World, UniversalCoords.FromWorld(player.Position.X + 4, player.Position.Y, player.Position.Z), stack);
+            return DropItem(player.GetWorld(), UniversalCoords.FromAbsWorld(player.Position.X + 4, player.Position.Y, player.Position.Z), stack);
         }
 
         /// <summary>
         /// Drops an item at the given location.
         /// </summary>
         /// <param name="world">The world in which the coordinates reside.</param>
-        /// <param name="x">The target X coordinate.</param>
-        /// <param name="y">The target Y coordinate.</param>
-        /// <param name="z">The target Z coordinate.</param>
+        /// <param name="coords">The target coordinate</param>
         /// <param name="stack">The stack to be dropped</param>
+        /// <param name="velocity">An optional velocity (the velocity will be clamped to -0.4 and 0.4 on each axis)</param>
         /// <returns>The entity ID of the item drop.</returns>
-        public int DropItem(WorldManager world, UniversalCoords coords, ItemStack stack)
+        public int DropItem(IWorldManager world, UniversalCoords coords, IItemStack stack, Vector3 velocity = new Vector3())
         {
             int entityId = AllocateEntity();
+
+            bool sendVelocity = false;
+            if (velocity != Vector3.Origin)
+            {
+                velocity = new Vector3(velocity.X.Clamp(-0.4, 0.4), velocity.Y.Clamp(-0.4, 0.4), velocity.Z.Clamp(-0.4, 0.4));
+                sendVelocity = true;
+            }
+
             AddEntity(new ItemEntity(this, entityId)
             {
-                World = world,
+                World = world as WorldManager,
                 Position = new AbsWorldCoords(new Vector3(coords.WorldX + 0.5, coords.WorldY, coords.WorldZ + 0.5)), // Put in the middle of the block (ignoring Y)
                 ItemId = stack.Type,
                 Count = stack.Count,
+                Velocity = velocity,
                 Durability = stack.Durability
             });
+
+            if (sendVelocity)
+                SendPacketToNearbyPlayers(world as WorldManager, coords, new EntityVelocityPacket { EntityId = entityId, VelocityX = (short)(velocity.X * 8000), VelocityY = (short)(velocity.Y * 8000), VelocityZ = (short)(velocity.Z * 8000) });
+
             return entityId;
         }
 
@@ -792,7 +1419,7 @@ namespace Chraft
         /// Gets a thread-safe array of worlds.
         /// </summary>
         /// <returns>A thread-safe array of WorldManager objects.</returns>
-        public WorldManager[] GetWorlds()
+        public IWorldManager[] GetWorlds()
         {
             return Worlds.ToArray();
         }
@@ -803,7 +1430,7 @@ namespace Chraft
         /// </summary>
         internal void DoPulse()
         {
-            foreach (Client c in GetClients())
+            foreach (Client c in GetAuthenticatedClients())
                 c.SendPulse();
             OnPulse();
         }
@@ -818,7 +1445,7 @@ namespace Chraft
         /// Gets the default/main world of the server in a thread-safe fashion.
         /// </summary>
         /// <returns>The default world of the server.</returns>
-        public WorldManager GetDefaultWorld()
+        public IWorldManager GetDefaultWorld()
         {
             return Worlds[0];
         }
@@ -828,17 +1455,22 @@ namespace Chraft
         /// </summary>
         public void Stop()
         {
+            Logger.Log(LogLevel.Info, "Shutting down server");
             foreach (Client c in GetClients())
                 c.Kick("Server is shutting down.");
             foreach (WorldManager w in GetWorlds())
                 w.Dispose();
             Running = false;
-           
+
             if (Irc != null)
                 Irc.Stop();
+
+            Logger.Log(LogLevel.Info, "Server stopped, press enter to exit");
+            Console.ReadLine();
+            Environment.Exit(0);
         }
 
-        internal void OnCommand(Client client, ClientCommand cmd, string[] tokens)
+        internal void OnCommand(Client client, IClientCommand cmd, string[] tokens)
         {
             if (Command != null)
                 Command.Invoke(client, new CommandEventArgs(client, cmd, tokens));

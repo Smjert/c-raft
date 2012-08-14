@@ -1,15 +1,32 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Collections;
+using Chraft.PluginSystem.Event;
 
 namespace Chraft.Plugins.Events
 {
-    public class EventList : IEnumerable<ChraftEventHandler>
+    public class EventList : IEnumerable<IChraftEventHandler>
     {
-        private List<ChraftEventHandler> Events = new List<ChraftEventHandler>();
-        private Dictionary<Event, ChraftEventHandler> Mappings = new Dictionary<Event, ChraftEventHandler>();
+        private List<IChraftEventHandler> Events = new List<IChraftEventHandler>();
+        private Dictionary<Event, IChraftEventHandler> Mappings = new Dictionary<Event, IChraftEventHandler>();
         
         public EventList() { }
         /// <summary>
@@ -17,9 +34,9 @@ namespace Chraft.Plugins.Events
         /// </summary>
         /// <param name="Event">The name of the event(e.g. PLUGIN_ENABLED).</param>
         /// <returns>Event Handler</returns>
-        public ChraftEventHandler Find(Event Event)
+        public IChraftEventHandler Find(Event Event)
         {
-            foreach (ChraftEventHandler e in Events)
+            foreach (IChraftEventHandler e in Events)
             {
                 if (e.Events.Contains(Event))
                 {
@@ -35,7 +52,7 @@ namespace Chraft.Plugins.Events
         /// Adds an event handler.
         /// </summary>
         /// <param name="e">The Event handler to add.</param>
-        public void Add(ChraftEventHandler e)
+        public void Add(IChraftEventHandler e)
         {
             Events.Add(e);
             foreach (Event Event in e.Events)
@@ -57,9 +74,9 @@ namespace Chraft.Plugins.Events
         /// This removes the event handler and ALL Mappings linked to this handler.
         /// </summary>
         /// <param name="e"></param>
-        public void RemoveEventHandler(ChraftEventHandler e)
+        public void RemoveEventHandler(IChraftEventHandler e)
         {
-            foreach(KeyValuePair<Event, ChraftEventHandler> ed in from ed in Mappings 
+            foreach(KeyValuePair<Event, IChraftEventHandler> ed in from ed in Mappings 
                     where Mappings.ContainsValue(e) select ed)
             {
                 Mappings.Remove(ed.Key);
@@ -67,7 +84,7 @@ namespace Chraft.Plugins.Events
             Events.Remove(e);
         }
 
-        public IEnumerator<ChraftEventHandler> GetEnumerator()
+        public IEnumerator<IChraftEventHandler> GetEnumerator()
         {
             return Events.GetEnumerator();
         }

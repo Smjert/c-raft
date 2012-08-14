@@ -1,11 +1,30 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using Chraft.Entity;
 using Chraft.Interfaces;
-using Chraft.Plugins.Events.Args;
-using Chraft.World.Blocks.Interfaces;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.World;
+using Chraft.PluginSystem.World.Blocks;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Collision;
+using Chraft.Utilities.Coords;
+using Chraft.World.Blocks.Base;
 
 namespace Chraft.World.Blocks
 {
@@ -19,39 +38,62 @@ namespace Chraft.World.Blocks
             IsSingleHit = true;
             BurnEfficiency = 100;
             Opacity = 0x0;
+            BlockBoundsOffset = new BoundingBox(0.1, 0, 0.1, 0.9, 0.8, 0.9);
         }
 
 
         protected override bool CanBePlacedOn(EntityBase entity, StructBlock block, StructBlock targetBlock, BlockFace targetSide)
         {
-            if (!BlockHelper.Instance(targetBlock.Type).IsFertile || targetSide != BlockFace.Up)
+            if (!BlockHelper.Instance.IsFertile(targetBlock.Type) || targetSide != BlockFace.Up)
                 return false;
             return base.CanBePlacedOn(entity, block, targetBlock, targetSide);
         }
 
-        protected override void DropItems(EntityBase entity, StructBlock block)
+        protected override void DropItems(EntityBase entity, StructBlock block, List<ItemStack> overridedLoot = null)
         {
-            LootTable = new List<ItemStack>();
-            LootTable.Add(new ItemStack((short)Type, 1, block.MetaData));
-            base.DropItems(entity, block);
+            overridedLoot = new List<ItemStack>();
+            overridedLoot.Add(new ItemStack((short)Type, 1, block.MetaData));
+            base.DropItems(entity, block, overridedLoot);
         }
 
-        public bool CanGrow(StructBlock block)
+        public bool CanGrow(IStructBlock block, IChunk chunk)
         {
-            if (block.Coords.WorldY > 120)
+            if (chunk == null || block.Coords.WorldY > 120)
                 return false;
+            /*UniversalCoords oneUp = UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY + 1,
+                                                              block.Coords.WorldZ);
+            byte lightUp = block.World.GetBlockData(oneUp);
+            if (lightUp < 9)
+                return false;*/
             return true;
         }
 
-        public void Grow(StructBlock block)
+        public void Grow(IStructBlock iBlock, IChunk ichunk)
         {
-            if (!CanGrow(block))
+            Chunk chunk = ichunk as Chunk;
+
+            StructBlock block = (StructBlock) iBlock;
+
+            if (!CanGrow(block, chunk))
                 return;
+
+            UniversalCoords blockUp = UniversalCoords.FromWorld(block.Coords.WorldX, block.Coords.WorldY + 1, block.Coords.WorldZ);
+            if (block.World.GetEffectiveLight(blockUp) < 9)
+                return;
+
+            if (block.World.Server.Rand.Next(29) != 0)
+                return;
+
+            if ((block.MetaData & 8) == 0)
+            {
+                chunk.SetData(block.Coords, (byte)(block.MetaData | 8));
+                return;
+            }
 
             for (int i = block.Coords.WorldY; i < block.Coords.WorldY + 4; i++)
             {
-                block.World.SetBlockAndData(block.Coords.WorldX, i, block.Coords.WorldZ, (byte)BlockData.Blocks.Log, block.MetaData);
-                if (block.World.GetBlockId(block.Coords.WorldX, i + 1, block.Coords.WorldZ) != (byte)BlockData.Blocks.Air)
+                chunk.SetBlockAndData(block.Coords.BlockX, i, block.Coords.BlockZ, (byte)BlockData.Blocks.Log, block.MetaData);
+                if(chunk.GetType(block.Coords.BlockX, i + 1, block.Coords.BlockZ) != BlockData.Blocks.Air)
                     break;
             }
 
@@ -59,24 +101,27 @@ namespace Chraft.World.Blocks
             for (int i = block.Coords.WorldY + 2; i < block.Coords.WorldY + 5; i++)
                 for (int j = block.Coords.WorldX - 2; j <= block.Coords.WorldX + 2; j++)
                     for (int k = block.Coords.WorldZ - 2; k <= block.Coords.WorldZ + 2; k++)
-                        if (!block.World.ChunkExists(j >> 4, k >> 4) || (block.World.GetBlockId(j, i, k) != (byte)BlockData.Blocks.Air))
+                    {
+                        Chunk nearbyChunk = block.World.GetChunkFromWorld(i, k) as Chunk;
+                        if (nearbyChunk == null || (nearbyChunk.GetType(j & 0xF, i, k & 0xF) != BlockData.Blocks.Air))
                             continue;
-                        else
-                            block.World.SetBlockAndData(j, i, k, (byte)BlockData.Blocks.Leaves,
+
+
+                        nearbyChunk.SetBlockAndData(j & 0xF, i, k & 0xF, (byte)BlockData.Blocks.Leaves,
                                                         block.MetaData);
+                    }
 
             for (int i = block.Coords.WorldX - 1; i <= block.Coords.WorldX + 1; i++)
                 for (int j = block.Coords.WorldZ - 1; j <= block.Coords.WorldZ + 1; j++)
-                    if (!block.World.ChunkExists(i >> 4, j >> 4) || (block.World.GetBlockId(i, block.Coords.WorldY + 5, j) != (byte)BlockData.Blocks.Air))
+                {
+                    Chunk nearbyChunk = block.World.GetChunkFromWorld(i, j) as Chunk;
+                    if (nearbyChunk == null || nearbyChunk.GetType(i & 0xF, block.Coords.WorldY + 5, j & 0xF) != BlockData.Blocks.Air)
                         continue;
-                    else
-                        block.World.SetBlockAndData(i, block.Coords.WorldY + 5, j, (byte)BlockData.Blocks.Leaves,
+
+
+                    nearbyChunk.SetBlockAndData(i & 0xF, block.Coords.WorldY + 5, j & 0xF, (byte)BlockData.Blocks.Leaves,
                                                     block.MetaData);
-            AbsWorldCoords absCoords = new AbsWorldCoords(block.Coords);
-            foreach (Net.Client c in block.World.Server.GetNearbyPlayers(block.World, absCoords))
-            {
-                c.SendBlockRegion(block.Coords.WorldX - 3, block.Coords.WorldY, block.Coords.WorldZ - 3, 7, 7, 7);
-            }
+                }
         }
     }
 }

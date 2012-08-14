@@ -1,136 +1,183 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
+using System.Collections;
 using System.Collections.Concurrent;
+using System.IO;
+using System.Linq;
 using System.Net.Sockets;
 using Chraft.Entity;
 using Chraft.Net.Packets;
+using Chraft.PluginSystem.Net;
+using Chraft.PluginSystem.Server;
+using Chraft.Utilities;
+using Chraft.Utilities.Coords;
 using Chraft.World;
-using Chraft.Properties;
+using Chraft.Utilities.Config;
 using System.Threading;
+using Chraft.World.Blocks;
 using Chraft.World.Weather;
-using System.Threading.Tasks;
-using System.Collections.Generic;
+using Chraft.PluginSystem;
 
 namespace Chraft.Net
 {
-    public partial class Client 
+    public partial class Client : IClient
     {
-        public ConcurrentQueue<Packet> packetsToBeSent = new ConcurrentQueue<Packet>();
+        public ConcurrentQueue<Packet> PacketsToBeSent = new ConcurrentQueue<Packet>();
+        public ConcurrentQueue<Chunk> ChunksToBeSent = new ConcurrentQueue<Chunk>();
+
+        private int _chunkTimerRunning;
 
         private int _TimesEnqueuedForSend;
-        public void SendPacket(Packet packet)
+        private Timer _chunkSendTimer;
+
+        private DateTime _lastChunkTimerStart = DateTime.MinValue;
+        private int _startDelay;
+
+        internal void SendPacket(IPacket iPacket)
         {
+            Packet packet = iPacket as Packet;
             if (!Running)
                 return;
 
-            packetsToBeSent.Enqueue(packet);
+            if (packet.Logger == null)
+                packet.Logger = Server.Logger;
+
+            PacketsToBeSent.Enqueue(packet);
 
             int newValue = Interlocked.Increment(ref _TimesEnqueuedForSend);
 
-            if ((newValue - 1) == 0)
+            if (newValue == 1)
+            {
                 Server.SendClientQueue.Enqueue(this);
+                
+            }
 
-            //Logger.Log(Chraft.Logger.LogLevel.Info, "Sending packet: {0}", packet.GetPacketType().ToString());
+            Server.NetworkSignal.Set();
 
-            _Player.Server.NetworkSignal.Set();
+            //Logger.Log(Chraft.LogLevel.Info, "Sending packet: {0}", packet.GetPacketType().ToString());           
         }
 
-        public void Send_Async(byte[] data)
+        private void Send_Async(byte[] data)
         {
-            if (!Running)
+            if (!Running || !_socket.Connected)
             {
                 DisposeSendSystem();
                 return;
             }
 
             if (data[0] == (byte)PacketType.Disconnect)
-                _SendSocketEvent.Completed += Disconnected;
+                _sendSocketEvent.Completed += Disconnected;
 
-            _SendSocketEvent.SetBuffer(data, 0, data.Length);
-
-            bool pending = _Socket.SendAsync(_SendSocketEvent);
-
+            _sendSocketEvent.SetBuffer(data, 0, data.Length);
+            bool pending = _socket.SendAsync(_sendSocketEvent);
             if (!pending)
-                Send_Completed(null, _SendSocketEvent);
+                Send_Completed(null, _sendSocketEvent);
         }
-
-        public void Send_Sync(byte[] data)
+        
+        private void Send_Sync(byte[] data)
         {
-            if (!Running)
+            if (!Running || !_socket.Connected)
             {
                 DisposeSendSystem();
                 return;
             }
-            _Socket.Send(data, data.Length, 0);
-        }
-
-        public void Send_Start(Packet packet = null)
-        {
-            if(!Running)
-            {
-                DisposeSendSystem();
-                return;
-            }
-
             try
             {
-                byte[] data;
-                if (packet == null)
-                {
-                    if (packetsToBeSent.Count > 0)
+                _socket.Send(data, 0, data.Length, 0);
+
+                if (DateTime.Now + TimeSpan.FromSeconds(5) > _nextActivityCheck)
+                    _nextActivityCheck = DateTime.Now + TimeSpan.FromSeconds(5);
+            }
+            catch (Exception)
+            {
+                Stop();
+            }         
+        }
+
+        internal void Send_Sync_Packet(Packet packet)
+        {
+            packet.Write();
+            Send_Sync(packet.GetBuffer());
+            packet.Release();
+        }
+
+        internal void Send_Start()
+        {
+            if (!Running || !_socket.Connected)
+            {
+                DisposeSendSystem();
+                return;
+            }
+
+            Packet packet = null;
+            try
+            {
+                ByteQueue byteQueue = new ByteQueue();
+                int length = 0;
+                    while (!PacketsToBeSent.IsEmpty && length <= 1024)
                     {
-                        if (!packetsToBeSent.TryDequeue(out packet))
+                        if (!PacketsToBeSent.TryDequeue(out packet))
                         {
                             Interlocked.Exchange(ref _TimesEnqueuedForSend, 0);
                             return;
                         }
 
-                        packet.Write();
-                        data = packet.GetBuffer();
+                        if (!packet.Shared)
+                            packet.Write();
 
-                        if (packet.Async)
-                            Send_Async(data);
-                        else
-                        {
-                            Send_Sync(data);
-                            while (Running && packetsToBeSent.Count > 0)
-                            {
-                                if (!packetsToBeSent.TryDequeue(out packet))
-                                {
-                                    Interlocked.Exchange(ref _TimesEnqueuedForSend, 0);
-                                    return;
-                                }
+                        byte[] packetBuffer = packet.GetBuffer();
+                        length += packetBuffer.Length;
 
-                                if (packet.Async)
-                                    break;
+                        byteQueue.Enqueue(packetBuffer, 0, packetBuffer.Length);
+                        packet.Release();
 
-                                packet.Write();
-                                data = packet.GetBuffer();
-
-                                Send_Sync(data);
-                                packet = null;
-                            }
-
-                            if (packet != null)
-                                Send_Start(packet);
-                            else
-                                Interlocked.Exchange(ref _TimesEnqueuedForSend, 0);
-                        }
                     }
-                    else
-                        Interlocked.Exchange(ref _TimesEnqueuedForSend, 0);
+
+                if (byteQueue.Length > 0)
+                {
+                    byte[] data = new byte[length];
+                    byteQueue.Dequeue(data, 0, data.Length);
+                    Send_Async(data);
                 }
                 else
                 {
-                    packet.Write();
-                    data = packet.GetBuffer();
-                    Send_Async(data);
+                    Interlocked.Exchange(ref _TimesEnqueuedForSend, 0);
+
+                    if (!PacketsToBeSent.IsEmpty)
+                    {
+                        int newValue = Interlocked.Increment(ref _TimesEnqueuedForSend);
+
+                        if (newValue == 1)
+                        {
+                            Server.SendClientQueue.Enqueue(this);
+                            Server.NetworkSignal.Set();
+                        }
+                    }
                 }
             }
             catch (Exception e)
             {
                 MarkToDispose();
                 DisposeSendSystem();
-                Logger.Log(Logger.LogLevel.Error, e.Message);
+                if(packet != null)
+                    Logger.Log(LogLevel.Error, "Sending packet: {0}", packet.ToString());
+                Logger.Log(LogLevel.Error, e.ToString());
+
                 // TODO: log something?
             }
             
@@ -142,175 +189,288 @@ namespace Chraft.Net
                 e.Completed -= Disconnected;
             if (!Running)
                 DisposeSendSystem();
-            else if(e.SocketError == SocketError.Success)
+            else if(e.SocketError != SocketError.Success)
+            {
+                MarkToDispose();
+                DisposeSendSystem();
+                _nextActivityCheck = DateTime.MinValue;
+            }
+            else
+            {
+                if (DateTime.Now + TimeSpan.FromSeconds(5) > _nextActivityCheck)
+                    _nextActivityCheck = DateTime.Now + TimeSpan.FromSeconds(5);
                 Send_Start();
+            }
         }
 
         internal void SendPulse()
         {
-            if(_Player.LoggedIn)
+            if (_player != null && _player.LoggedIn)
             {
                 SendPacket(new TimeUpdatePacket
                 {
-                    Time = _Player.World.Time
+                    Time = _player.World.Time
                 });
-                _Player.SynchronizeEntities();
+                //_player.SynchronizeEntities();
             }
         }
 
         internal void SendBlock(int x, int y, int z, byte type, byte data)
         {
-            if (_Player.LoggedIn)
+            if (_player.LoggedIn)
             {
                 SendPacket(new BlockChangePacket
                 {
                     Data = data,
                     Type = type,
                     X = x,
-                    Y = (sbyte)y,
+                    Y = (sbyte) y,
                     Z = z
                 });
             }
         }
 
-        /// <summary>
-        /// Updates a region of blocks
-        /// </summary>
-        /// <param name="x">Start coordinate, X component</param>
-        /// <param name="y">Start coordinate, Y component</param>
-        /// <param name="z">Start coordinate, Z component</param>
-        /// <param name="l">Length (X magnitude)</param>
-        /// <param name="w">Height (Y magnitude)</param>
-        /// <param name="h">Width (Z magnitude)</param>
-        public void SendBlockRegion(int x, int y, int z, int l, int h, int w)
-        {
-            for (int dx = 0; dx < l; dx++)
-            {
-                for (int dy = 0; dy < h; dy++)
-                {
-                    for (int dz = 0; dz < w; dz++)
-                    {
-                        byte? type = _Player.World.GetBlockOrNull(x + dx, y + dy, z + dz);
-                        if (type != null)
-                            SendBlock(x + dx, y + dy, z + dz, type.Value, _Player.World.GetBlockData(x + dx, y + dy, z + dz));
-                    }
-                }
-            }
-        }
-
         private void SendMotd()
         {
-            string MOTD = Settings.Default.MOTD.Replace("%u", _Player.DisplayName);
+            string MOTD = ChraftConfig.MOTD.Replace("%u", _player.DisplayName);
             SendMessage(MOTD);
         }
 
 
         #region Login
 
-        public void SendLoginRequest()
+        internal void SendLoginRequest()
         {
-            SendPacket(new LoginRequestPacket
+            Send_Sync_Packet(new LoginRequestPacket
             {
-                ProtocolOrEntityId = _Player.SessionID,
-                Dimension = _Player.World.Dimension,
+                ProtocolOrEntityId = _player.EntityId,
+                Dimension = _player.World.Dimension,
                 Username = "",
-                MapSeed = _Player.World.Seed,
                 WorldHeight = 128,
                 MaxPlayers = 50,
-                Unknown = 2
+                Difficulty = 2
             });
         }
 
-        public void SendInitialTime()
+        public void SendInitialTime(bool async = true)
         {
-            SendPacket(new TimeUpdatePacket
+            Packet packet = new TimeUpdatePacket
             {
-                Time = _Player.World.Time
-            });
+                Time = _player.World.Time
+            };
+
+            if (async)
+                SendPacket(packet);
+            else
+                Send_Sync_Packet(packet);
         }
 
-        public void SendInitialPosition()
+        internal void SendInitialPosition(bool async = true)
         {
-            SendPacket(new PlayerPositionRotationPacket
-            {
-                X = _Player.Position.X,
-                Y = _Player.Position.Y + Player.EyeGroundOffset,
-                Z = _Player.Position.Z,
-                Yaw = (float)_Player.Yaw,
-                Pitch = (float)_Player.Pitch,
-                Stance = Stance,
-                OnGround = false
-            });
+            if(async)
+                SendPacket(new PlayerPositionRotationPacket
+                {
+                    X = _player.Position.X,
+                    Y = _player.Position.Y + this._player.EyeHeight,
+                    Z = _player.Position.Z,
+                    Yaw = (float)_player.Yaw,
+                    Pitch = (float)_player.Pitch,
+                    Stance = Stance,
+                    OnGround = false
+                });
+            else
+                Send_Sync_Packet(new PlayerPositionRotationPacket
+                {
+                    X = _player.Position.X,
+                    Y = _player.Position.Y + this._player.EyeHeight,
+                    Z = _player.Position.Z,
+                    Yaw = (float)_player.Yaw,
+                    Pitch = (float)_player.Pitch,
+                    Stance = Stance,
+                    OnGround = false
+                });
         }
 
-        public void SendSpawnPosition()
+        internal void SendSpawnPosition(bool async = true)
         {
-            SendPacket(new SpawnPositionPacket
+            Packet packet = new SpawnPositionPacket
             {
-                X = _Player.World.Spawn.WorldX,
-                Y = _Player.World.Spawn.WorldY,
-                Z = _Player.World.Spawn.WorldZ
-            });
+                X = _player.World.Spawn.WorldX,
+                Y = _player.World.Spawn.WorldY,
+                Z = _player.World.Spawn.WorldZ
+            };
+
+            if (async)
+                SendPacket(packet);
+            else
+                Send_Sync_Packet(packet);
         }
 
-        public void SendHandshake()
+        internal void SendHandshake()
         {
             SendPacket(new HandshakePacket
             {
 
-                UsernameOrHash = (_Player.Server.UseOfficalAuthentication ? _Player.Server.ServerHash : "-")
+                UsernameAndIpOrHash = (Server.UseOfficalAuthentication ? Server.ServerHash : "-")
                 //UsernameOrHash = "-" // No authentication
                 //UsernameOrHash = this.Server.ServerHash // Official Minecraft server authentication
             });
         }
 
-        public void SendLoginSequence()
+        public bool WaitForInitialPosAck;
+
+        internal void SendLoginSequence()
         {
-            _Player.Permissions = _Player.PermHandler.LoadClientPermission(this);
+            foreach(Client client in Server.GetAuthenticatedClients())
+            {
+                if(client.Username == Username)
+                    client.Stop();
+            }
+            _player = new Player(Server, Server.AllocateEntity(), this);
+            _player.Permissions = _player.PermHandler.LoadClientPermission(this);
             Load();
-            StartKeepAliveTimer();
+
+            if (!_player.World.Running)
+            {
+                Stop();
+                return;
+            }
+
             SendLoginRequest();
-            SendSpawnPosition();
-            SendInitialTime();
-            // This must be sent sync otherwise we will fall through them
-            _Player.UpdateChunks(2, true, CancellationToken.None);
-            SendInitialPosition();
-            SendInitialTime();
+            SendSpawnPosition(false);
+            SendInitialTime(false);
+            _player.UpdateChunks(4, CancellationToken.None, true, false);
+            SendInitialPosition(false);            
+        }
+
+        internal void SendSecondLoginSequence()
+        {           
+            SendInitialTime(false);
             SetGameMode();
-            _Player.InitializeInventory();
-            _Player.InitializeHealth();
-            _Player.OnJoined();
+            _player.InitializeInventory();
+            _player.InitializeHealth();
+            _player.OnJoined();
+            Server.AddEntity(_player, false);
+            Server.AddAuthenticatedClient(this);  
             SendMotd();
-            /*Thread.Sleep(10000);
-            _UpdateChunks = new Task(() => _Player.UpdateChunks(Settings.Default.SightRadius, CancellationToken.None));
-            _UpdateChunks.Start();*/
+
+            StartKeepAliveTimer();
+            _player.UpdateEntities();
+            Server.SendEntityToNearbyPlayers(_player.World, _player);
+            Server.FreeConnectionSlot();
         }
 
         #endregion
 
-
         #region Chunks
 
-        public void SendPreChunk(int x, int z, bool load, bool sync)
+        internal void SendPreChunk(int x, int z, bool load, bool sync)
         {
             PreChunkPacket prepacket = new PreChunkPacket
             {
                 Load = load,
                 X = x,
                 Z = z,
-                Async = !sync
             };
-            SendPacket(prepacket);
+
+            if (!sync)
+                SendPacket(prepacket);
+            else
+                Send_Sync_Packet(prepacket);
         }
 
         internal void SendChunk(Chunk chunk, bool sync)
         {
-            MapChunkPacket packet = new MapChunkPacket
+            if (!sync)
             {
-                Chunk = chunk,
-                Async = !sync
-            };
-            SendPacket(packet);
+                ChunksToBeSent.Enqueue(chunk);
+                int newValue = Interlocked.Increment(ref _chunkTimerRunning);
+
+                if (newValue == 1)
+                {
+                    if (_lastChunkTimerStart != DateTime.MinValue)
+                        _startDelay = 1000 - (int)(DateTime.Now - _lastChunkTimerStart).TotalMilliseconds;
+
+                    if (_startDelay < 0)
+                        _startDelay = 0;
+
+                    if(_chunkSendTimer != null)
+                        _chunkSendTimer.Change(_startDelay, 1000);
+                }
+            }
+            else
+                Send_Sync_Packet(new MapChunkPacket
+                {
+                    Chunk = chunk,
+                    Logger = Logger
+                });
+        }
+
+        internal void SendChunks(object state)
+        {
+            for (int i = 0; i < 20 && !ChunksToBeSent.IsEmpty; ++i)
+            {
+                Chunk chunk;
+                ChunksToBeSent.TryDequeue(out chunk);
+
+                SendPacket(new MapChunkPacket
+                {
+                    Chunk = chunk,
+                    Logger = Logger
+                });
+            }
+
+            if (ChunksToBeSent.IsEmpty)
+            {
+                _chunkSendTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                Interlocked.Exchange(ref _chunkTimerRunning, 0);
+            }
+
+            if(!ChunksToBeSent.IsEmpty)
+            {
+                int running = Interlocked.Exchange(ref _chunkTimerRunning, 1);
+
+                if (running == 0)
+                {
+                    if (_lastChunkTimerStart != DateTime.MinValue)
+                        _startDelay = 1000 - (int)(DateTime.Now - _lastChunkTimerStart).TotalMilliseconds;
+
+                    if (_startDelay < 0)
+                        _startDelay = 0;
+                    _chunkSendTimer.Change(_startDelay, 1000);
+                }
+            }
+            _lastChunkTimerStart = DateTime.Now;
+        }
+
+        internal void SendSignTexts(Chunk chunk)
+        {
+            foreach (var signKVP in chunk.SignsText)
+            {
+                int blockX = signKVP.Key >> 11;
+                int blockY = (signKVP.Key & 0xFF) % 128;
+                int blockZ = (signKVP.Key >> 7) & 0xF;
+
+                UniversalCoords coords = UniversalCoords.FromBlock(chunk.Coords.ChunkX, chunk.Coords.ChunkZ, blockX, blockY, blockZ);
+
+                string[] lines = new string[4];
+
+                int length = signKVP.Value.Length;
+
+                for (int i = 0; i < 4; ++i, length -= 15)
+                {
+                    int currentLength = length;
+                    if (currentLength > 15)
+                        currentLength = 15;
+
+                    if (length > 0)
+                        lines[i] = signKVP.Value.Substring(i * 15, currentLength);
+                    else
+                        lines[i] = "";
+                }
+
+                SendPacket(new UpdateSignPacket { X = coords.WorldX, Y = coords.WorldY, Z = coords.WorldZ, Lines = lines });
+            }
         }
 
         #endregion
@@ -318,79 +478,35 @@ namespace Chraft.Net
 
         #region Entities
 
-        public void SendCreateEntity(EntityBase entity)
+        internal void SendCreateEntity(EntityBase entity)
         {
-            if (entity is Player)
+            Packet packet;
+            if ((packet = (Server.GetSpawnPacket(entity) as Packet)) != null)
             {
-                Player p = ((Player) entity);
-                Client c = p.Client;
-
-                SendPacket(new NamedEntitySpawnPacket
+                if (packet is NamedEntitySpawnPacket)
                 {
-                    EntityId = p.EntityId,
-                    X = p.Position.X,
-                    Y = p.Position.Y,
-                    Z = p.Position.Z,
-                    Yaw = p.PackedYaw,
-                    Pitch = p.PackedPitch,
-                    PlayerName = p.Username + p.EntityId,
-                    CurrentItem = 0
-                });
-                for (short i = 0; i < 5; i++)
-                {
-                    SendPacket(new EntityEquipmentPacket
+                    SendPacket(packet);
+                    for (short i = 0; i < 5; i++)
                     {
-                        EntityId = p.EntityId,
-                        Slot = i,
-                        ItemId = -1,
-                        Durability = 0
-                    });
+                        SendPacket(new EntityEquipmentPacket
+                        {
+                            EntityId = entity.EntityId,
+                            Slot = i,
+                            ItemId = -1,
+                            Durability = 0
+                        });
+                    }
                 }
             }
-            else if (entity is ItemEntity)
+            else if (entity is TileEntity)
             {
-                ItemEntity item = (ItemEntity)entity;
-                SendPacket(new SpawnItemPacket
-                {
-                    X = item.Position.X,
-                    Y = item.Position.Y,
-                    Z = item.Position.Z,
-                    Yaw = item.PackedYaw,
-                    Pitch = item.PackedPitch,
-                    EntityId = item.EntityId,
-                    ItemId = item.ItemId,
-                    Count = item.Count,
-                    Durability = item.Durability,
-                    Roll = 0
-                });
-            }
-            else if (entity is Mob)
-            {
-                
-                Mob mob = (Mob)entity;
-                Logger.Log(Logger.LogLevel.Debug, ("ClientSpawn: Sending Mob " + mob.Type + " (" + mob.Position.X + ", " + mob.Position.Y + ", " + mob.Position.Z + ")"));
-                SendPacket(new MobSpawnPacket
-                {
-                    X = mob.Position.X,
-                    Y = mob.Position.Y,
-                    Z = mob.Position.Z,
-                    Yaw = mob.PackedYaw,
-                    Pitch = mob.PackedPitch,
-                    EntityId = mob.EntityId,
-                    Type = mob.Type,
-                    Data = mob.Data
-                });
+
             }
             else
-                if (entity is TileEntity)
-                {
-                    
-                }
-                else
-                {
-                    SendEntity(entity);
-                    SendTeleportTo(entity);
-                }
+            {
+                SendEntity(entity);
+                SendTeleportTo(entity);
+            }               
         }
 
         internal void SendEntity(EntityBase entity)
@@ -401,7 +517,16 @@ namespace Chraft.Net
             });
         }
 
-        public void SendDestroyEntity(EntityBase entity)
+        internal void SendEntityMetadata(LivingEntity entity)
+        {
+            SendPacket(new EntityMetadataPacket
+            {
+                EntityId = entity.EntityId,
+                Data = entity.Data
+            });
+        }
+
+        internal void SendDestroyEntity(EntityBase entity)
         {
             SendPacket(new DestroyEntityPacket
             {
@@ -472,7 +597,7 @@ namespace Chraft.Net
 
         #region Clients
 
-        public void SendHoldingEquipment(Client c) // Updates entity holding via 0x05
+        internal void SendHoldingEquipment(Client c) // Updates entity holding via 0x05
         {
             SendPacket(new EntityEquipmentPacket
             {
@@ -483,7 +608,7 @@ namespace Chraft.Net
             });
         }
 
-        public void SendEntityEquipment(Client c, short slot) // Updates entity equipment via 0x05
+        internal void SendEntityEquipment(Client c, short slot) // Updates entity equipment via 0x05
         {
             SendPacket(new EntityEquipmentPacket
             {
@@ -496,7 +621,7 @@ namespace Chraft.Net
 
         #endregion
 
-        public void SendWeather(WeatherState weather, UniversalCoords coords)
+        internal void SendWeather(WeatherState weather, UniversalCoords coords)
         {
 
             //throw new NotImplementedException();

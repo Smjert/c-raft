@@ -1,23 +1,39 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Runtime.Serialization;
-using Chraft.Net;
-using Chraft.Interfaces.Recipes;
 using Chraft.Net.Packets;
+using Chraft.Entity;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Item;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
 
 namespace Chraft.Interfaces
 {
-	[Serializable]
-	public partial class Inventory : CraftingInterface
-	{
+    [Serializable]
+	public class Inventory : CraftingInterface, IInventory
+    {
 
 		private short _ActiveSlot;
 		public short ActiveSlot { get { return _ActiveSlot; } }
 
         
-        public Chraft.Interfaces.ItemStack ActiveItem { 
+        public ItemStack ActiveItem { 
             get { return this[ActiveSlot]; }
         }
 
@@ -44,7 +60,12 @@ namespace Chraft.Interfaces
 			UpdateClient();
 		}
 
-		public override void Associate(Player player)
+        public IItemStack GetActiveItem()
+        {
+            return ActiveItem;
+        }
+
+		internal override void Associate(Player player)
 		{
 			base.Associate(player);
 		}
@@ -58,18 +79,18 @@ namespace Chraft.Interfaces
 		/// Gets an array of quick slots.
 		/// </summary>
 		/// <returns>Quick slots from left to right</returns>
-		public IEnumerable<ItemStack> GetQuickSlots()
+		public IEnumerable<IItemStack> GetQuickSlots()
 		{
-			for (short i = 36; i < this.SlotCount; i++)
+			for (short i = (short)InventorySlots.QuickSlotFirst; i <= (short)InventorySlots.QuickSlotLast; i++)
 				yield return this[i];
 		}
 
-		internal void AddItem(short id, sbyte count, short durability)
+		public void AddItem(short id, sbyte count, short durability, bool isInGame =true)
 		{
 			// Quickslots, stacking
-			for (short i = 36; i < this.SlotCount; i++)
+            for (short i = (short)InventorySlots.QuickSlotFirst; i <= (short)InventorySlots.QuickSlotLast; i++)
 			{
-				if (!ItemStack.IsVoid(Slots[i]) && Slots[i].Type == id && Slots[i].Durability == durability)
+                if (!Slots[i].IsVoid() && Slots[i].Type == id && Slots[i].Durability == durability)
 				{
 					if (Slots[i].Count + count <= 64)
 					{
@@ -82,9 +103,9 @@ namespace Chraft.Interfaces
 			}
 
 			// Inventory, stacking
-			for (short i = 9; i < 36; i++)
+			for (short i = (short)InventorySlots.InventoryFirst; i <= (short)InventorySlots.InventoryLast; i++)
 			{
-				if (!ItemStack.IsVoid(Slots[i]) && Slots[i].Type == id && Slots[i].Durability == durability)
+                if (!Slots[i].IsVoid() && Slots[i].Type == id && Slots[i].Durability == durability)
 				{
 					if (Slots[i].Count + count <= 64)
 					{
@@ -97,28 +118,33 @@ namespace Chraft.Interfaces
 			}
 
 			// Quickslots, not stacking
-			for (short i = 36; i < this.SlotCount; i++)
+            for (short i = (short)InventorySlots.QuickSlotFirst; i <= (short)InventorySlots.QuickSlotLast; i++)
 			{
-				if (ItemStack.IsVoid(Slots[i]))
+                if (Slots[i].IsVoid())
 				{
-					Owner.Client.SendPacket(new ChatMessagePacket { Message = "Placing in slot " + i });
-					this[i] = new ItemStack(id, count, durability) { Slot = i };
+                    if (isInGame)
+                    {
+                        Owner.Client.SendPacket(new ChatMessagePacket {Message = "Placing in slot " + i});
+                    }
+				    this[i] = new ItemStack(id, count, durability) { Slot = i };
 					return;
 				}
 			}
 
 			// Inventory, not stacking
-			for (short i = 9; i < 36; i++)
+            for (short i = (short)InventorySlots.InventoryFirst; i <= (short)InventorySlots.InventoryLast; i++)
 			{
-				if (ItemStack.IsVoid(Slots[i]))
+                if (Slots[i].IsVoid())
 				{
 					this[i] = new ItemStack(id, count, durability) { Slot = i };
 					return;
 				}
 			}
+
+            Owner.MarkToSave();
 		}
 
-        internal void RemoveItem(short slot)
+        public void RemoveItem(short slot)
         {
             if (this[slot].Type > 0)
             {
@@ -131,33 +157,38 @@ namespace Chraft.Interfaces
                     this[slot].Count -= 1;
                 }
             }
+
+            Owner.MarkToSave();
         }
 
-        internal bool DamageItem(short slot)
+        public bool DamageItem(short slot, short damageAmount = 1)
         {
             short durability = 0;
 
-            World.BlockData.ToolDuarability.TryGetValue((World.BlockData.Items)this[slot].Type, out durability);
+            BlockData.ToolDuarability.TryGetValue((BlockData.Items)this[slot].Type, out durability);
 
             if (durability > 0)
             {
-                if (this[slot].Durability == durability)
+                if (this[slot].Durability >= durability)
                 {
                     if (this[slot].Count == 1)
                     {
                         this[slot] = ItemStack.Void;
+                        Owner.MarkToSave();
                         return true;
                     }
                     else // This will allow stacked tools to work properly.
                     {
                         this[slot].Durability = 0;
                         this[slot].Count--;
+                        Owner.MarkToSave();
                         return true;
                     }
                 }
                 else
                 {
-                    this[slot].Durability++;
+                    this[slot].Durability += damageAmount;
+                    Owner.MarkToSave();
                     return true;
                 }
             }
@@ -171,6 +202,21 @@ namespace Chraft.Interfaces
 
             // Always leave the inventory open
             _IsOpen = true;
+        }
+
+        public enum InventorySlots : short
+        {
+            CraftingOutput = 0,
+            CraftingInputFirst = 1,
+            CraftingInputLast = 4,
+            Head = 5,
+            Chest = 6,
+            Legs = 7,
+            Feets = 8,
+            InventoryFirst = 9,
+            InventoryLast = 35,
+            QuickSlotFirst = 36,
+            QuickSlotLast = 44
         }
 	}
 }

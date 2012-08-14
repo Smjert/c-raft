@@ -1,10 +1,34 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Chraft.Interfaces;
+using Chraft.PluginSystem.Net;
+using Chraft.PluginSystem.Server;
+using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
+using Chraft.Utilities.Coords;
+using Chraft.Utilities.Misc;
 using Chraft.World;
 using Chraft.Entity;
+using Chraft.PluginSystem;
 
 namespace Chraft.Net.Packets
 {
@@ -14,15 +38,22 @@ namespace Chraft.Net.Packets
     /// use sbytes for handling bytes of negative value (-128 to 127) otherwise normal bytes (0-255) are fine
     /// </summary>
 
-    public abstract class Packet
+    public abstract class Packet : IPacket
     {
+        public static StreamRole Role;
         public abstract void Read(PacketReader reader);
         public abstract void Write();
 
         protected PacketWriter Writer;
 
         private int _Length;
-        public bool Async = true;
+        public bool Shared { get; private set; }
+        public int Written;
+        public Logger Logger;
+
+        private byte[] _buffer;
+
+        private int _sharesNum;
         protected virtual int Length { get { return _Length; } set { _Length = value; } }
 
         public PacketType GetPacketType()
@@ -32,12 +63,11 @@ namespace Chraft.Net.Packets
 
         protected Packet()
         {
-            
         }
 
         public void SetCapacity()
         {
-            Writer = PacketWriter.CreateInstance(Length, StreamRole.Server);
+            Writer = PacketWriter.CreateInstance(Length);
             Writer.Write((byte)GetPacketType());
         }
 
@@ -60,19 +90,70 @@ namespace Chraft.Net.Packets
                 strings.Enqueue(bytes);
             }
 
-            Writer = PacketWriter.CreateInstance(Length, StreamRole.Server, strings);
+            Writer = PacketWriter.CreateInstance(Length, strings);
             Writer.Write((byte)GetPacketType());
+        }
+
+        public void SetShared(ILogger logger, int num)
+        {
+            Logger = (Logger)logger;
+            if (num == 0)
+            {
+                _sharesNum = 1;
+                Logger.Log(LogLevel.Error, "Packet {0}, shares must be > 0!! Setting to 1", ToString());
+            }
+            Shared = true;
+            _sharesNum = num;
+            Write();
+
+            _buffer = new byte[Length];
+            byte[] underlyingBuffer = Writer.UnderlyingStream.GetBuffer();
+            try
+            {
+                Buffer.BlockCopy(underlyingBuffer, 0, _buffer, 0, Length);
+            }
+            catch (Exception e)
+            {
+                throw new Exception(String.Format("Writer {0}, Request {1} \r\n{2}", underlyingBuffer.Length, Length, e));
+            }
+        }
+
+        public void Release()
+        {
+            if (!Shared)
+            {
+                PacketWriter.ReleaseInstance(Writer);
+                _buffer = null;
+            }
+            else
+            {
+                int shares = Interlocked.Decrement(ref _sharesNum);
+
+                if (shares == 0)
+                {
+                    PacketWriter.ReleaseInstance(Writer);
+                    _buffer = null;
+                }
+            }
         }
 
         public byte[] GetBuffer()
         {
-            byte[] buffer = new byte[Length];
-            Buffer.BlockCopy(Writer.UnderlyingStream.GetBuffer(), 0, buffer, 0, Length);
-            PacketWriter.ReleaseInstance(Writer);
+            if (!Shared)
+            {
+                _buffer = new byte[Length];
+                byte[] underlyingBuffer = Writer.UnderlyingStream.GetBuffer();
+                try
+                {
+                    Buffer.BlockCopy(underlyingBuffer, 0, _buffer, 0, Length);
+                }
+                catch (Exception e)
+                {
+                    throw new Exception(String.Format("Writer {0}, Request {1} \r\n{2}", underlyingBuffer.Length, Length, e));
+                }
+            }
 
-            /*if (Strings != null)
-                Strings.Clear();*/
-            return buffer;
+            return _buffer;
         }
     }
 
@@ -97,10 +178,10 @@ namespace Chraft.Net.Packets
     {
         public int ProtocolOrEntityId { get; set; }
         public string Username { get; set; }
-        public long MapSeed { get; set; }
+        public string Level_Type { get; set; }
         public int ServerMode { get; set; }
-        public sbyte Dimension { get; set; }
-        public sbyte Unknown { get; set; }
+        public int Dimension { get; set; }
+        public sbyte Difficulty { get; set; }
         public byte WorldHeight { get; set; }
         public byte MaxPlayers { get; set; }
 
@@ -108,41 +189,48 @@ namespace Chraft.Net.Packets
         {
             ProtocolOrEntityId = reader.ReadInt();
             Username = reader.ReadString16(16);
-            MapSeed = reader.ReadLong();
+            Level_Type = reader.ReadString16(9);
             ServerMode = reader.ReadInt();
-            Dimension = reader.ReadSByte();
-            Unknown = reader.ReadSByte();
+            Dimension = reader.ReadInt();
+            Difficulty = reader.ReadSByte();
             WorldHeight = reader.ReadByte();
             MaxPlayers = reader.ReadByte();
         }
 
         public override void Write()
         {
-            SetCapacity(23, Username);
+            string levelType = "DEFAULT"; // TODO: get from config
+            SetCapacity(20, Username, levelType);
             Writer.Write(ProtocolOrEntityId);
             Writer.Write(Username);
-            Writer.Write(MapSeed);
+            Writer.Write(levelType);
             Writer.Write(ServerMode);
             Writer.Write(Dimension);
-            Writer.Write(Unknown);
+            Writer.Write(Difficulty);
             Writer.Write(WorldHeight);
             Writer.Write(MaxPlayers);
+        }
+
+        public enum LevelType
+        {
+            DEFAULT,
+            SUPERFLAT
         }
     }
 
     public class HandshakePacket : Packet
     {
-        public string UsernameOrHash { get; set; }
+        public string UsernameAndIpOrHash { get; set; }
 
         public override void Read(PacketReader stream)
         {
-            UsernameOrHash = stream.ReadString16(16);
+            UsernameAndIpOrHash = stream.ReadString16(64);
         }
 
         public override void Write()
         {
-            SetCapacity(3, UsernameOrHash);
-            Writer.Write(UsernameOrHash);
+            SetCapacity(3, UsernameAndIpOrHash);
+            Writer.Write(UsernameAndIpOrHash);
         }
     }
 
@@ -277,37 +365,38 @@ namespace Chraft.Net.Packets
 
     public class RespawnPacket : Packet
     {
-        public sbyte World { get; set; }
-        public sbyte Unknown { get; set; }
+        public int World { get; set; }
+        public sbyte Difficulty { get; set; }
         public sbyte CreativeMode { get; set; } // 0 for survival, 1 for creative.
         public short WorldHeight { get; set; } // Default 128
-        public long MapSeed { get; set; }
-
-        protected override int Length { get { return 14; } }
+        public string LevelType { get; set; } // TODO: read from config
 
         public override void Read(PacketReader stream)
         {
-            World = stream.ReadSByte();
-            Unknown = stream.ReadSByte();
+            World = stream.ReadInt();
+            Difficulty = stream.ReadSByte();
             CreativeMode = stream.ReadSByte();
             WorldHeight = stream.ReadShort();
-            MapSeed = stream.ReadLong();
+            LevelType = stream.ReadString16(9);
         }
 
         public override void Write()
         {
-            SetCapacity();
+            string levelType = "DEFAULT";
+            SetCapacity(11, levelType);
             Writer.Write(World);
-            Writer.Write(Unknown);
+            Writer.Write(Difficulty);
             Writer.Write(CreativeMode);
             Writer.Write(WorldHeight);
-            Writer.Write(MapSeed);
+            Writer.Write(levelType);
         }
     }
 
     public class PlayerPacket : Packet
     {
         public bool OnGround { get; set; }
+
+        protected override int Length { get { return 2; } }
 
         public override void Read(PacketReader stream)
         {
@@ -316,6 +405,7 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
+            SetCapacity();
             Writer.Write(OnGround);
         }
     }
@@ -353,6 +443,8 @@ namespace Chraft.Net.Packets
         public double Z { get; set; }
         public bool OnGround { get; set; }
 
+        protected override int Length { get { return 34; } }
+
         public override void Read(PacketReader stream)
         {
             X = stream.ReadDouble();
@@ -364,6 +456,7 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
+            SetCapacity();
             Writer.Write(X);
             Writer.Write(Y);
             Writer.Write(Stance);
@@ -408,7 +501,7 @@ namespace Chraft.Net.Packets
         public override void Read(PacketReader stream)
         {
             //X,Y,Stance are in different order for Client->Server vs. Server->Client
-            if (stream.Role == StreamRole.Server)
+            if (Packet.Role == StreamRole.Server)
             {
                 X = stream.ReadDouble();
                 Stance = stream.ReadDouble();
@@ -430,7 +523,7 @@ namespace Chraft.Net.Packets
         {
             SetCapacity();
             //X,Y,Stance are in different order for Client->Server vs. Server->Client
-            if (Writer.Role == StreamRole.Server)
+            if (Packet.Role == StreamRole.Server)
             {
                 Writer.Write(X);
                 Writer.Write(Y);
@@ -503,11 +596,17 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
+            if (Item == null || Item.Type == -1)
+                SetCapacity(13);
+            else
+                SetCapacity(16);
+
             Writer.Write(X);
             Writer.Write(Y);
             Writer.Write(Z);
             Writer.Write((sbyte)Face);
             (Item ?? ItemStack.Void).Write(Writer);
+            Length = (int)Writer.UnderlyingStream.Length;
         }
     }
 
@@ -591,6 +690,8 @@ namespace Chraft.Net.Packets
         public int PlayerId { get; set; }
         public ActionType Action { get; set; }
 
+        protected override int Length { get { return 6; } }
+
         public override void Read(PacketReader stream)
         {
             PlayerId = stream.ReadInt();
@@ -599,6 +700,7 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
+            SetCapacity();
             Writer.Write(PlayerId);
             Writer.Write((sbyte)Action);
         }
@@ -632,9 +734,9 @@ namespace Chraft.Net.Packets
             SetCapacity(23, PlayerName);
             Writer.Write(EntityId);
             Writer.Write(PlayerName);
-            Writer.Write((int)(X * 32));
-            Writer.Write((int)(Y * 32));
-            Writer.Write((int)(Z * 32));
+            Writer.Write((int)Math.Floor(X * 32.0));
+            Writer.Write((int)Math.Floor(Y * 32.0));
+            Writer.Write((int)Math.Floor(Z * 32.0));
             Writer.Write(Yaw);
             Writer.Write(Pitch);
             Writer.Write(CurrentItem);
@@ -729,9 +831,12 @@ namespace Chraft.Net.Packets
             Y = stream.ReadInt() / 32.0d;
             Z = stream.ReadInt() / 32.0d;
             FireBallThrowerEid = stream.ReadInt();
-            FireBallX = stream.ReadShort();
-            FireBallY = stream.ReadShort();
-            FireBallZ = stream.ReadShort();
+            if (FireBallThrowerEid != 0)
+            {
+                FireBallX = stream.ReadShort();
+                FireBallY = stream.ReadShort();
+                FireBallZ = stream.ReadShort();
+            }
         }
 
         public override void Write()
@@ -758,6 +863,7 @@ namespace Chraft.Net.Packets
             StorageCart = 11,
             PoweredCart = 12,
             ActivatedTNT = 50,
+            EnderCrystal = 51,
             Arrow = 60,
             ThrownSnowball = 61,
             ThrownEgg = 62,
@@ -776,23 +882,25 @@ namespace Chraft.Net.Packets
         public double Z { get; set; }
         public sbyte Yaw { get; set; }
         public sbyte Pitch { get; set; }
+        public sbyte HeadYaw { get; set; }
         public MetaData Data { get; set; }
 
         public override void Read(PacketReader stream)
         {
             EntityId = stream.ReadInt();
             Type = (MobType)stream.ReadByte();
-            X = (double)stream.ReadInt() / 32.0d;
-            Y = (double)stream.ReadInt() / 32.0d;
-            Z = (double)stream.ReadInt() / 32.0d;
+            X = stream.ReadInt() / 32.0d;
+            Y = stream.ReadInt() / 32.0d;
+            Z = stream.ReadInt() / 32.0d;
             Yaw = stream.ReadSByte();
             Pitch = stream.ReadSByte();
+            HeadYaw = stream.ReadSByte();
             Data = stream.ReadMetaData();
         }
 
         public override void Write()
         {
-            SetCapacity(20);
+            SetCapacity(22);
             Writer.Write(EntityId);
             Writer.Write((byte)Type);
             Writer.Write((int)(X * 32));
@@ -800,6 +908,7 @@ namespace Chraft.Net.Packets
             Writer.Write((int)(Z * 32));
             Writer.Write(Yaw);
             Writer.Write(Pitch);
+            Writer.Write(HeadYaw);
             Writer.Write(Data);
             // This is because we don't know the dimension of Data in advance
             Length = (int)Writer.UnderlyingStream.Length;
@@ -837,42 +946,14 @@ namespace Chraft.Net.Packets
         }
     }
 
-    public class UnknownAPacket : Packet
-    {
-        public float Sink1 { get; set; }
-        public float Sink2 { get; set; }
-        public float Sink3 { get; set; }
-        public float Sink4 { get; set; }
-        public bool Sink5 { get; set; }
-        public bool Sink6 { get; set; }
-
-        public override void Read(PacketReader stream)
-        {
-            Sink1 = stream.ReadFloat();
-            Sink2 = stream.ReadFloat();
-            Sink3 = stream.ReadFloat();
-            Sink4 = stream.ReadFloat();
-            Sink5 = stream.ReadBool();
-            Sink6 = stream.ReadBool();
-        }
-
-        public override void Write()
-        {
-            Writer.Write(Sink1);
-            Writer.Write(Sink2);
-            Writer.Write(Sink3);
-            Writer.Write(Sink4);
-            Writer.Write(Sink5);
-            Writer.Write(Sink6);
-        }
-    }
-
     public class EntityVelocityPacket : Packet
     {
         public int EntityId { get; set; }
         public short VelocityX { get; set; }
         public short VelocityY { get; set; }
         public short VelocityZ { get; set; }
+
+        protected override int Length { get { return 11; } }
 
         public override void Read(PacketReader stream)
         {
@@ -884,6 +965,7 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
+            SetCapacity();
             Writer.Write(EntityId);
             Writer.Write(VelocityX);
             Writer.Write(VelocityY);
@@ -1036,9 +1118,9 @@ namespace Chraft.Net.Packets
         {
             SetCapacity();
             Writer.Write(EntityId);
-            Writer.Write((int)(X * 32));
-            Writer.Write((int)(Y * 32));
-            Writer.Write((int)(Z * 32));
+            Writer.Write((int)Math.Floor(X * 32.0));
+            Writer.Write((int)Math.Floor(Y * 32.0));
+            Writer.Write((int)Math.Floor(Z * 32.0));
             Writer.Write(Yaw);
             Writer.Write(Pitch);
         }
@@ -1099,7 +1181,7 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
-            SetCapacity(5);
+            SetCapacity(6);
             Writer.Write(EntityId);
             Writer.Write(Data);
 
@@ -1156,16 +1238,18 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
-            SetCapacity(11 + (CoordsArray.Length * 2) + Types.Length + Metadata.Length);
+            SetCapacity(15 + (CoordsArray.Length * 4));
             Writer.Write(ChunkCoords.ChunkX);
             Writer.Write(ChunkCoords.ChunkZ);
+
             Writer.Write((short)CoordsArray.Length);
+            Writer.Write(CoordsArray.Length * 4);
             for (int i = 0; i < CoordsArray.Length; i++)
+            {
                 Writer.Write(CoordsArray[i]);
-            for (int i = 0; i < Types.Length; i++)
-                Writer.Write(Types[i]);
-            for (int i = 0; i < Metadata.Length; i++)
-                Writer.Write(Metadata[i]);
+
+                Writer.Write((short)((Types[i] & 0xFFF) << 4 | (Metadata[i] & 0xF)));
+            }
         }
     }
 
@@ -1444,27 +1528,23 @@ namespace Chraft.Net.Packets
     public class CreativeInventoryActionPacket : Packet
     {
         public short Slot { get; set; }
-        public short ItemID { get; set; }
-        public short Quantity { get; set; }
-        public short Damage { get; set; }
-
-        protected override int Length { get { return 9; } }
+        public ItemStack Item { get; set; }
 
         public override void Read(PacketReader stream)
         {
             Slot = stream.ReadShort();
-            ItemID = stream.ReadShort();
-            Quantity = stream.ReadShort();
-            Damage = stream.ReadShort();
+            Item = ItemStack.Read(stream);
         }
 
         public override void Write()
         {
-            SetCapacity();
             Writer.Write(Slot);
-            Writer.Write(ItemID);
-            Writer.Write(Quantity);
-            Writer.Write(Damage);
+            if (Item == null || Item.Type == -1)
+                SetCapacity(5);
+            else
+                SetCapacity(8);
+
+            Length = (int)Writer.UnderlyingStream.Length;
         }
     }
 
@@ -1504,12 +1584,18 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
+            if (Item == null || Item.Type == -1)
+                SetCapacity(10);
+            else
+                SetCapacity(13);
+
             Writer.Write(WindowId);
             Writer.Write(Slot);
             Writer.Write(RightClick);
             Writer.Write(Transaction);
             Writer.Write(Shift);
             (Item ?? ItemStack.Void).Write(Writer);
+            Length = (int)Writer.UnderlyingStream.Length;
         }
     }
 
@@ -1518,8 +1604,6 @@ namespace Chraft.Net.Packets
         public sbyte WindowId { get; set; }
         public short Slot { get; set; }
         public ItemStack Item { get; set; }
-
-        protected override int Length { get { return (Item == null || Item.Type == -1) ? 6 : 9; } }
 
         public override void Read(PacketReader stream)
         {
@@ -1530,10 +1614,15 @@ namespace Chraft.Net.Packets
 
         public override void Write()
         {
-            SetCapacity();
+            if (Item == null || Item.Type == -1)
+                SetCapacity(6);
+            else
+                SetCapacity(9);
+
             Writer.Write(WindowId);
             Writer.Write(Slot);
             (Item ?? ItemStack.Void).Write(Writer);
+            Length = (int)Writer.UnderlyingStream.Length;
         }
     }
 
@@ -1636,7 +1725,7 @@ namespace Chraft.Net.Packets
             Z = stream.ReadInt();
             Lines = new string[4];
             for (int i = 0; i < Lines.Length; i++)
-                Lines[i] = stream.ReadString16(25);
+                Lines[i] = stream.ReadString16(15);
         }
 
         public override void Write()
@@ -1657,7 +1746,7 @@ namespace Chraft.Net.Packets
     public class ServerListPingPacket : Packet
     {
         protected override int Length { get { return 1; } }
-        
+
         public override void Read(PacketReader stream)
         {
         }
@@ -1745,7 +1834,8 @@ namespace Chraft.Net.Packets
             InvalidBed = 0,
             BeginRaining = 1,
             EndRaining = 2,
-            ChangeGameMode = 3
+            ChangeGameMode = 3,
+            EndGameCredits = 4
         }
     }
 
@@ -1930,5 +2020,157 @@ namespace Chraft.Net.Packets
         Hunger = 17, //Food bar turns green - Caused by poisoning from Rotten Flesh or Raw Chicken
         Weakness = 18,
         Poison = 19 //Hearts turn yellow - Caused by poisoning from cave (blue) spider
+    }
+
+    public class EnchantItemPacket : Packet
+    {
+        public byte WindowId { get; set; }
+        public byte Enchantment { get; set; }
+
+        protected override int Length { get { return 3; } }
+
+        public override void Read(PacketReader reader)
+        {
+            WindowId = reader.ReadByte();
+            Enchantment = reader.ReadByte();
+        }
+
+        public override void Write()
+        {
+            SetCapacity();
+            Writer.WriteByte(WindowId);
+            Writer.WriteByte(Enchantment);
+        }
+    }
+
+    public class ExperiencePacket : Packet
+    {
+        public float Experience { get; set; }
+        public short Level { get; set; }
+        public short TotExperience { get; set; }
+
+        protected override int Length { get { return 9; } }
+
+        public override void Read(PacketReader reader)
+        {
+            Experience = reader.ReadFloat();
+            Level = reader.ReadShort();
+            TotExperience = reader.ReadShort();
+        }
+
+        public override void Write()
+        {
+            SetCapacity();
+
+            Writer.Write(Experience);
+            Writer.Write(Level);
+            Writer.Write(TotExperience);
+        }
+    }
+
+    public class PluginMessagePacket : Packet
+    {
+        public string Channel { get; set; }
+        public short ByteLength { get; set; }
+        public byte[] Data { get; set; }
+
+        public override void Read(PacketReader reader)
+        {
+            Channel = reader.ReadString16(260);
+            ByteLength = reader.ReadShort();
+            Data = reader.ReadBytes(ByteLength);
+        }
+
+        public override void Write()
+        {
+            SetCapacity();
+            Writer.Write(Channel);
+            Writer.Write(ByteLength);
+            for (int i = 0; i < ByteLength; i++)
+            {
+                Writer.WriteByte(Data[i]);
+            }
+
+        }
+    }
+
+    public class EntityHeadLook : Packet
+    {
+        public int EntityId { get; set; }
+        public sbyte HeadYaw { get; set; }
+
+        public override void Read(PacketReader reader)
+        {
+            EntityId = reader.ReadInt();
+            HeadYaw = reader.ReadSByte();
+        }
+
+        public override void Write()
+        {
+            Writer.Write(EntityId);
+            Writer.Write(HeadYaw);
+        }
+    }
+
+    public class UpdateTileEntity : Packet
+    {
+        public int X { get; set; }
+        public short Y { get; set; }
+        public int Z { get; set; }
+        public sbyte Action { get; set; }
+        public int Custom1 { get; set; }
+        public int Custom2 { get; set; }
+        public int Custom3 { get; set; }
+
+        public override void Read(PacketReader reader)
+        {
+            X = reader.ReadInt();
+            Y = reader.ReadShort();
+            Z = reader.ReadInt();
+            Action = reader.ReadSByte();
+            Custom1 = reader.ReadInt();
+            Custom2 = reader.ReadInt();
+            Custom3 = reader.ReadInt();
+        }
+
+        public override void Write()
+        {
+            Writer.Write(X);
+            Writer.Write(Y);
+            Writer.Write(Z);
+            Writer.Write(Action);
+            Writer.Write(Custom1);
+            Writer.Write(Custom2);
+            Writer.Write(Custom3);
+        }
+    }
+
+    public class PlayerAbilitiesPacket : Packet
+    {
+        //Only in creative mode.
+
+        //Invulnerabitity not used yet
+        public bool Invulnerability { get; set; }
+        public bool IsFlying { get; set; }
+        public bool CanFly { get; set; }
+        //InstantDestroy not used yet
+        public bool InstantDestroy { get; set; }
+
+        public override void Read(PacketReader reader)
+        {
+            Invulnerability = reader.ReadBool();
+            IsFlying = reader.ReadBool();
+            CanFly = reader.ReadBool();
+            InstantDestroy = reader.ReadBool();
+        }
+
+        public override void Write()
+        {
+            SetCapacity(5);
+            Writer.Write(Invulnerability);
+            Writer.Write(IsFlying);
+            Writer.Write(CanFly);
+            Writer.Write(InstantDestroy);
+        }
     }
 }

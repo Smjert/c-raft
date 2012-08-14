@@ -1,18 +1,36 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using Chraft.Interfaces;
-using Chraft.Properties;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Item;
+using Chraft.Utilities.Config;
 
 namespace Chraft.Utils
 {
-    public class ItemDb
+    public class ItemDb : IItemDb
     {
         private Dictionary<string, short> Items = new Dictionary<string, short>();
         private Dictionary<string, short> Durabilities = new Dictionary<string, short>();
 
-        public ItemStack this[string item]
+        internal ItemStack this[string item]
         {
             get
             {
@@ -23,13 +41,18 @@ namespace Chraft.Utils
                     {
                         item = ItemName(numeric);
                     }
-                    return Contains(item) ? new ItemStack(Items[item], Settings.Default.DefaultStackSize, Durabilities[item]) : ItemStack.Void;
+                    return Contains(item) ? new ItemStack(Items[item], ChraftConfig.DefaultStackSize, Durabilities[item]) : ItemStack.Void;
                 }
                 catch (Exception)
                 {
                     return ItemStack.Void;
                 }
             }
+        }
+
+        public IItemStack GetItemStack(string item)
+        {
+            return this[item];
         }
 
         public ItemDb(string file)

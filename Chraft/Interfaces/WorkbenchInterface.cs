@@ -1,11 +1,30 @@
-﻿using System;
+#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Chraft.Interfaces.Recipes;
 using Chraft.Net;
 using Chraft.Net.Packets;
+using Chraft.Utilities;
+using Chraft.Utilities.Coords;
 using Chraft.World;
+using Chraft.Entity;
 
 namespace Chraft.Interfaces
 {
@@ -16,7 +35,7 @@ namespace Chraft.Interfaces
 		{
 		}
 
-		public override void Associate(Player player)
+		internal override void Associate(Player player)
 		{
 			base.Associate(player);
 		}
@@ -50,8 +69,19 @@ namespace Chraft.Interfaces
             }
             else
             {
-                base.DropAll(UniversalCoords.FromWorld((int)Owner.Position.X, (int)Owner.Position.Y, (int)Owner.Position.Z));
+                base.DropAll(UniversalCoords.FromAbsWorld(Owner.Position));
             }
+        }
+
+        public enum WorkbenchSlots : short
+        {
+            CraftingOutput = 0,
+            CraftingInputFirst = 1,
+            CraftingInputLast = 9,
+            InventoryFirst = 10,
+            InventoryLast = 36,
+            QuickSlotFirst = 37,
+            QuickSlotLast = 45
         }
 	}
 }

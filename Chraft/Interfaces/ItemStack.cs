@@ -1,20 +1,46 @@
-﻿using System;
+﻿#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Chraft.Net;
+using Chraft.PluginSystem;
+using Chraft.PluginSystem.Item;
 using Chraft.World;
 using System.Runtime.Serialization;
 
 namespace Chraft.Interfaces
 {
     [Serializable]
-    public class ItemStack
+    public class ItemStack : IItemStack
     {
         public event EventHandler Changed;
 
-        internal short Slot { get; set; }
+        public short Slot { get; internal set; }
         public static ItemStack Void { get { return new ItemStack(-1, 0, 0); } } // Needs to send -1 via 0x05
+
+        public bool IsEnchantable()
+        {
+            if ((Type >= 256 && Type <= 258) || Type == 261 || (Type >= 267 && Type <= 279)
+                || (Type >= 283 && Type <= 286) || (Type >= 290 && Type <= 294) || (Type >= 298 && Type <= 317))
+                return true;
+            return false;
+        }
 
         private short _Type;
         public short Type
@@ -69,6 +95,10 @@ namespace Chraft.Interfaces
             {
                 Count = stream.ReadSByte();
                 Durability = stream.ReadShort();
+
+                // TODO: Implement extra data read (enchantment) and items
+                if (Durability > 0 || IsEnchantable())
+                    stream.ReadShort();
             }
         }
 
@@ -79,12 +109,16 @@ namespace Chraft.Interfaces
             {
                 Count = stream.ReadSByte();
                 Durability = stream.ReadShort();
+
+                // TODO: Implement extra data read (enchantment) and items
+                if (Durability > 0 || IsEnchantable())
+                    stream.ReadShort();
             }
         }
 
-        public static bool IsVoid(ItemStack stack)
+        public bool IsVoid()
         {
-            return stack == null || stack.Count < 1 || stack.Type <= 0;
+            return Count < 1 || Type <= 0;
         }
 
         private void OnChanged()
@@ -116,6 +150,19 @@ namespace Chraft.Interfaces
             {
                 stream.Write(Count);
                 stream.Write(Durability);
+
+                if (Durability > 0 || IsEnchantable())
+                    stream.Write((short)-1);
+                // TODO: Remove the two lines above and implement items and enchantments write
+                /* 
+                 * if (Item.CanBeDamaged())
+                 * {
+                 *      if(_enchantments != null)
+                 *          WriteEnchantmentsToNBT(stream);
+                 *      else
+                 *          stream.Write(-1);
+                 * }
+                 */
             }
         }
 
@@ -126,7 +173,48 @@ namespace Chraft.Interfaces
             {
                 stream.Write(Count);
                 stream.Write(Durability);
-            }
+
+                if (Durability > 0 || IsEnchantable())
+                    stream.Write((short)-1);
+                // TODO: Remove the two lines above and implement items and enchantments write
+                /* 
+                 * if (Item.CanBeDamaged())
+                 * {
+                 *      if(_enchantments != null)
+                 *          WriteEnchantmentsToNBT(stream);
+                 *      else
+                 *          stream.Write(-1);
+                 * }
+                 */
+            }            
+        }       
+
+        internal void ReadEnchantmentsFromNBT(PacketWriter stream)
+        {
+            // TODO: Implement this and choose return value
+        } 
+
+        internal void ReadEnchantmentsFromNBT(BigEndianStream stream)
+        {
+            // TODO: Implement this and choose return value
+        }
+
+        internal void WriteEnchantmentsToNBT(PacketWriter stream)
+        {
+            // TODO: Implement this
+            /*      Gzip the nbt representing enchantments
+             *      write the gzipped output length
+             *      write output 
+             */
+        }
+
+        internal void WriteEnchantmentsToNBT(BigEndianStream stream)
+        {
+            // TODO: Implement this
+            /*      Gzip the nbt representing enchantments
+             *      write the gzipped output length
+             *      write output 
+             */
         }
 
         public byte ToBlock()
@@ -171,6 +259,11 @@ namespace Chraft.Interfaces
             {
                 retval.Count = stream.ReadSByte();
                 retval.Durability = stream.ReadShort();
+
+                // TODO: Implement extra data read (enchantment) and items
+
+                if (retval.Durability > 0 || retval.IsEnchantable())
+                    stream.ReadShort();
             }
             return retval;
 
