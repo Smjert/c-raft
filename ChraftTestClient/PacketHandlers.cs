@@ -38,7 +38,6 @@ namespace ChraftTestClient
 
             Register(PacketType.KeepAlive, 5, 0, ReadKeepAlive);
             Register(PacketType.LoginRequest, 0, 23, ReadLoginRequest);
-            Register(PacketType.Handshake, 0, 3, ReadHandshake);
             Register(PacketType.ChatMessage, 0, 3, ReadChatMessage);
             Register(PacketType.Disconnect, 0, 3, ReadDisconnect);
             Register(PacketType.MapChunk, 0, 18, ReadMapChunk);
@@ -66,9 +65,9 @@ namespace ChraftTestClient
             Register(PacketType.Animation, 6, 0, ReadAnimation);
             Register(PacketType.PickupSpawn, 25, 0, ReadPickupSpawn);
             Register(PacketType.CollectItem, 9, 0, ReadCollectItem);
-            Register(PacketType.UpdateProgressBar, 6, 0, ReadUpdateProgressBar);
+            Register(PacketType.UpdateWindowProperty, 6, 0, ReadUpdateWindowProperty);
             Register(PacketType.EntityMetadata, 0, 6, ReadEntityMetadata);
-            Register(PacketType.SoundEffect, 18, 0, ReadSoundEffect);
+            Register(PacketType.SoundOrParticleEffect, 18, 0, ReadSoundEffect);
         }
 
         public static void Register(PacketType packetID, int length, int minimumLength, OnPacketReceive onReceive)
@@ -99,15 +98,6 @@ namespace ChraftTestClient
                 TestClient.HandlePacketLoginRequest(client, lr);
         }
 
-        public static void ReadHandshake(TestClient client, PacketReader reader)
-        {
-            HandshakePacket hp = new HandshakePacket();
-            hp.Read(reader);
-
-            if (!reader.Failed)
-                TestClient.HandlePacketHandshake(client, hp);
-        }
-
         public static void ReadChatMessage(TestClient client, PacketReader reader)
         {
             ChatMessagePacket cm = new ChatMessagePacket();
@@ -124,12 +114,6 @@ namespace ChraftTestClient
 
             if (!reader.Failed)
                 TestClient.HandlePacketDisconnect(client, dp);
-        }
-
-        public static void ReadPreChunk(TestClient client, PacketReader reader)
-        {
-            PreChunkPacket pc = new PreChunkPacket();
-            pc.Read(reader);
         }
 
         public static void ReadMapChunk(TestClient client, PacketReader reader)
@@ -292,9 +276,9 @@ namespace ChraftTestClient
             ci.Read(reader);
         }
 
-        public static void ReadUpdateProgressBar(TestClient client, PacketReader reader)
+        public static void ReadUpdateWindowProperty(TestClient client, PacketReader reader)
         {
-            UpdateProgressBarPacket up = new UpdateProgressBarPacket();
+            UpdateWindowPropertyPacket up = new UpdateWindowPropertyPacket();
             up.Read(reader);
         }
 
@@ -306,7 +290,7 @@ namespace ChraftTestClient
 
         public static void ReadSoundEffect(TestClient client, PacketReader reader)
         {
-            SoundEffectPacket se = new SoundEffectPacket();
+            SoundOrParticleEffectPacket se = new SoundOrParticleEffectPacket();
             se.Read(reader);
         }
     }

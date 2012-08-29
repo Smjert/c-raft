@@ -47,7 +47,6 @@ using Chraft.Utils;
 using System.Collections.Generic;
 using Chraft.WorldGen;
 using System.Collections.Concurrent;
-using java.util;
 using Timer = System.Threading.Timer;
 
 namespace Chraft.World
@@ -451,7 +450,7 @@ namespace Chraft.World
                     req.ClientRequesting.Owner.LoadedChunks.TryUpdate(entry.ChunkRequested.Coords.ChunkPackedCoords,
                                                                       entry.ChunkRequested, null);
                     entry.ChunkRequested.AddClient(req.ClientRequesting);
-                    req.ClientRequesting.SendChunk(entry.ChunkRequested, false);
+                    req.ClientRequesting.SendChunk(entry.ChunkRequested);
                 });
             });
         }

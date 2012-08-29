@@ -37,6 +37,7 @@ using System.Net.Sockets;
 using Chraft.World.Blocks;
 using Chraft.PluginSystem;
 using Chraft.World.Blocks.Base;
+using System.Text;
 
 namespace Chraft.Net
 {
@@ -172,11 +173,14 @@ namespace Chraft.Net
                 }
             }
         }
+
+        public int CurrentSightRadius { get; set; }
+
         public double Stance { get; internal set; }
 
         private readonly object _QueueSwapLock = new object();
 
-        public int TimesEnqueuedForRecv;
+        public int TimesEnqueuedForRecv;      
 
         internal ByteQueue GetBufferToProcess()
         {
@@ -765,9 +769,10 @@ namespace Chraft.Net
             }
         }
 
-        public static void HandleLocaleAndViewDistance(Client client, LocaleAndViewDistancePacket packet)
+        public static void HandlePacketLocaleAndViewDistance(Client client, LocaleAndViewDistancePacket packet)
         {
-            
+            if (packet.ViewDistance < ChraftConfig.MaxSightRadius)
+                client.CurrentSightRadius = packet.ViewDistance;
         }
 
         internal void StopUpdateChunks()
@@ -782,7 +787,12 @@ namespace Chraft.Net
         {
             _updateChunksToken = new CancellationTokenSource();
             var token = _updateChunksToken.Token;
-            _updateChunks = Task.Factory.StartNew(() => _player.UpdateChunks(ChraftConfig.SightRadius, token), token);
+            int sightRadius = ChraftConfig.MaxSightRadius;
+
+            if (Server.EnableUserSightRadius)
+                sightRadius = CurrentSightRadius > ChraftConfig.MaxSightRadius ? ChraftConfig.MaxSightRadius : CurrentSightRadius;
+
+            _updateChunks = Task.Factory.StartNew(() => _player.UpdateChunks(sightRadius, token), token);
         }
 
         private void CheckAndUpdateChunks(double packetX, double packetZ)
@@ -809,6 +819,43 @@ namespace Chraft.Net
 
         #region Login
 
+        public static bool IsAuthenticated(Client client)
+        {
+            if (client.Server.UseOfficalAuthentication)
+            {
+                try
+                {
+                    var uri = new Uri(
+                        String.Format(
+                            "http://session.minecraft.net/game/checkserver.jsp?user={0}&serverId={1}",
+                            client.Username,
+                            // As per http://mc.kev009.com/Protocol_Encryption
+                            PacketCryptography.JavaHexDigest(Encoding.UTF8.GetBytes(client.ConnectionId)
+                                                                            .Concat(client.SharedKey)
+                                                                            .Concat(PacketCryptography.PublicKeyToAsn1(client.Server.ServerKey))
+                                                                            .ToArray())
+                            ));
+                    
+                    string authenticated = Http.GetHttpResponse(uri);
+                    if (authenticated != "YES")
+                    {
+                        client.Kick("Authentication failed");
+                        return false;
+                    }
+                }
+                catch (Exception exc)
+                {
+                    client.Kick("Error while authenticating...");
+                    client.Logger.Log(exc);
+                    return false;
+                }
+
+                return true;
+            }
+
+            return true;
+        }
+
         public static void HandlePacketServerListPing(Client client, ServerListPingPacket packet)
         {
             // Received a ServerListPing, so send back Disconnect with the Reason string containing data (server description, number of users, number of slots), delimited by a §
@@ -833,53 +880,6 @@ namespace Chraft.Net
             else
             {
                 client.Host = packet.ServerHost + ":" + packet.ServerPort;
-
-                if (client.Server.EncryptionEnabled)
-                    client.SendEncryptionRequest();
-                else
-                    Task.Factory.StartNew(client.SendLoginSequence);
-            }         
-        }
-
-        public static void HandlePacketLoginRequest(Client client, LoginRequestPacket packet)
-        {
-            Task.Factory.StartNew(client.SendLoginSequence);
-        }
-
-        public static void HandleClientStatus(Client client, ClientStatusPacket packet)
-        {
-            if(packet.Status == 0)
-                Task.Factory.StartNew(client.SendLoginSequence);
-        }
-
-        public static void HandleEncryptionResponse(Client client, EncryptionKeyResponse packet)
-        {
-            client.SharedKey = PacketCryptography.Decrypt(packet.SharedSecret);
-            RijndaelManaged aes = PacketCryptography.GenerateAES(client.SharedKey);
-            client.Encrypter = aes.CreateEncryptor();
-            client.Decrypter = aes.CreateDecryptor();
-
-            byte[] packetToken = new byte[4];
-
-            client.Decrypter.TransformBlock(packet.VerifyToken, 0, 4, packetToken, 0);
-
-            if (!packetToken.SequenceEqual(packet.VerifyToken))
-            {
-                client.Kick("Wrong token");
-                return;
-            }
-
-            if (client.Server.UseOfficalAuthentication)
-            {
-                try
-                {
-                    string authenticated = Http.GetHttpResponse(new Uri(String.Format("http://www.minecraft.net/game/checkserver.jsp?user={0}&serverId={1}", client.Username, client.Server.ServerHash)));
-                    if (authenticated != "YES")
-                    {
-                        client.Kick("Authentication failed");
-                        return;
-                    }
-                }
                 catch (Exception exc)
                 {
                     client.Kick("Error while authenticating...");
@@ -888,7 +888,44 @@ namespace Chraft.Net
                 }
             }
 
+                if (client.Server.EncryptionEnabled)
+                    client.SendEncryptionRequest();
+                else if(IsAuthenticated(client))
+                    Task.Factory.StartNew(client.SendLoginSequence);
+                
+            }         
+        }
+
+        public static void HandlePacketClientStatus(Client client, ClientStatusPacket packet)
+        {
+            Console.WriteLine("Status arrived {0}", packet.Status);
+            if (packet.Status == 0 && IsAuthenticated(client))
+                Task.Factory.StartNew(client.SendLoginSequence);        
+        }
+
+        public static void HandlePacketEncryptionResponse(Client client, EncryptionKeyResponse packet)
+        {
+            client.SharedKey = PacketCryptography.Decrypt(packet.SharedSecret);
+            
+            RijndaelManaged recv = PacketCryptography.GenerateAES(client.SharedKey);
+            RijndaelManaged send = PacketCryptography.GenerateAES(client.SharedKey);
+
+            client.Decrypter = recv.CreateDecryptor();
+            
+            byte[] packetToken;
+
+            packetToken = PacketCryptography.Decrypt(packet.VerifyToken);
+
+            if (!packetToken.SequenceEqual(PacketCryptography.VerifyToken))
+            {
+                client.Kick("Wrong token");
+                return;
+            }
+
             client.Send_Sync_Packet(new EncryptionKeyResponse());
+
+            client.Encrypter = send.CreateEncryptor();
+            
         }
 
         #endregion

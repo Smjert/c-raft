@@ -72,18 +72,6 @@
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
-    <Reference Include="IKVM.OpenJDK.Core, Version=0.44.0.5, Culture=neutral, PublicKeyToken=13235d27fcbfff58">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>IKVM.OpenJDK.Core.dll</HintPath>
-    </Reference>
-    <Reference Include="IKVM.OpenJDK.Util, Version=0.44.0.5, Culture=neutral, PublicKeyToken=13235d27fcbfff58">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>IKVM.OpenJDK.Util.dll</HintPath>
-    </Reference>
-    <Reference Include="IKVM.Runtime, Version=0.44.0.5, Culture=neutral, PublicKeyToken=13235d27fcbfff58">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>IKVM.Runtime.dll</HintPath>
-    </Reference>
     <Reference Include="ICSharpCode.SharpZipLib, Version=0.86.0.518, Culture=neutral, PublicKeyToken=1b03e6acf1164f73">
       <HintPath>ICSharpCode.SharpZipLib.dll</HintPath>
     </Reference>
@@ -129,6 +117,8 @@
     <Compile Include="Net\Client.Send.cs" />
     <Compile Include="Net\Cryptography\PacketCryptography.cs" />
     <Compile Include="Net\PacketReader.cs" />
+    <Compile Include="Net\Packets\MapChunkBulkPacket.cs" />
+    <Compile Include="Net\Packets\MapChunkData.cs" />
     <Compile Include="Net\PacketWriter.cs" />
     <Compile Include="Net\SocketAsyncEventArgsPool.cs" />
     <Compile Include="Net\StreamRole.cs" />
@@ -136,11 +126,7 @@
     <Compile Include="Persistence\ClientSurrogate.cs" />
     <Compile Include="Persistence\DataFile.cs" />
     <Compile Include="Plugins\Events\BlockEvent.cs" />
-    <Compile Include="Properties\Settings.Designer.cs">
-      <DependentUpon>Settings.settings</DependentUpon>
-      <DesignTimeSharedInput>True</DesignTimeSharedInput>
-      <AutoGen>True</AutoGen>
-    </Compile>
+    <Compile Include="Plugins\PluginLogger.cs" />
     <Compile Include="Utils\PlayerNBTConverter.cs" />
     <Compile Include="WorldGen\ChunkProvider.cs" />
     <Compile Include="World\Blocks\Base\BlockBase.cs" />
@@ -286,10 +272,6 @@
     <Compile Include="Interfaces\Recipes\SmeltingRecipe.cs" />
     <Compile Include="Interfaces\SmallChestInterface.cs" />
     <Compile Include="Interfaces\WorkbenchInterface.cs" />
-    <Compile Include="Irc\HostMask.cs" />
-    <Compile Include="Irc\IrcClient.cs" />
-    <Compile Include="Irc\IrcClient.Recv.cs" />
-    <Compile Include="Irc\IrcEventArgs.cs" />
     <Compile Include="Net\Packets\MapChunkPacket.cs" />
     <Compile Include="Net\Packets\Packet.cs" />
     <Compile Include="Net\TcpEventArgs.cs" />
@@ -344,7 +326,8 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="Chraft.config">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <SubType>Designer</SubType>
     </Content>
     <Content Include="Resources\Permissions.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

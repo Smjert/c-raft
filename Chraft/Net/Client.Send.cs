@@ -54,12 +54,13 @@ namespace Chraft.Net
         internal void SendPacket(IPacket iPacket)
         {
             Packet packet = iPacket as Packet;
-            if (!Running)
+            if (!Running || ToDisconnect)
                 return;
 
             if (packet.Logger == null)
                 packet.Logger = Server.Logger;
 
+            
             PacketsToBeSent.Enqueue(packet);
 
             int newValue = Interlocked.Increment(ref _TimesEnqueuedForSend);
@@ -83,9 +84,6 @@ namespace Chraft.Net
                 return;
             }
 
-            if (data[0] == (byte)PacketType.Disconnect)
-                _sendSocketEvent.Completed += Disconnected;
-
             _sendSocketEvent.SetBuffer(data, 0, data.Length);
             bool pending = _socket.SendAsync(_sendSocketEvent);
             if (!pending)
@@ -101,13 +99,20 @@ namespace Chraft.Net
             }
             try
             {
+                if (Encrypter != null)
+                {
+                    byte[] toDecrypt = data;
+                    data = new byte[toDecrypt.Length];
+                    Encrypter.TransformBlock(toDecrypt, 0, toDecrypt.Length, data, 0);
+                }
                 _socket.Send(data, 0, data.Length, 0);
 
                 if (DateTime.Now + TimeSpan.FromSeconds(5) > _nextActivityCheck)
                     _nextActivityCheck = DateTime.Now + TimeSpan.FromSeconds(5);
             }
-            catch (Exception)
+            catch (Exception e)
             {
+                Logger.Log(LogLevel.Error, "Exception on Send_Sync: {0}", e.ToString());
                 Stop();
             }         
         }
@@ -149,14 +154,26 @@ namespace Chraft.Net
                         byteQueue.Enqueue(packetBuffer, 0, packetBuffer.Length);
                         packet.Release();
 
+                        if(packet is DisconnectPacket)
+                        {
+                            ToDisconnect = true;
+                            _sendSocketEvent.Completed += Disconnected;
+                            break;
+                        }
+
                     }
-                if(Encrypter != null)
-                    Encrypter.TransformBlock(byteQueue.UnderlyingBuffer, 0, byteQueue.UnderlyingBuffer.Length,
-                                         byteQueue.UnderlyingBuffer, 0);
+                
                 if (byteQueue.Length > 0)
                 {
                     byte[] data = new byte[length];
                     byteQueue.Dequeue(data, 0, data.Length);
+
+                    if (Encrypter != null)
+                    {
+                        byte[] toEncrypt = data;
+                        data = new byte[length];
+                        Encrypter.TransformBlock(toEncrypt, 0, length, data, 0);
+                    }
                     Send_Async(data);
                 }
                 else
@@ -190,8 +207,6 @@ namespace Chraft.Net
 
         private void Send_Completed(object sender, SocketAsyncEventArgs e)
         {
-            if (e.Buffer[0] == (byte)PacketType.Disconnect)
-                e.Completed -= Disconnected;
             if (!Running)
                 DisposeSendSystem();
             else if(e.SocketError != SocketError.Success)
@@ -246,22 +261,23 @@ namespace Chraft.Net
 
         internal void SendEncryptionRequest()
         {
-            /*byte[] publicKey = new byte[]{0x30,0x81,0x9F,0x30,0x0D,0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01,0x05,0x00,
-                0x03,0x81,0x8D,0x00,0x30,0x81,0x89,0x02,0x81,0x81,0x00,0xD2,0xFB,0x2E,0x72,0x72,0xAA,0xBB,0x9C,0xBB,0x9C,0x1A,0x09,
-                0x1A,0xE3,0x79,0xEB,0x68,0x2D,0xD5,0xFF,0xF0,0xC4,0xD7,0xDD,0xBA,0x29,0xE6,0x25,0x3D,0x79,0x06,0x16,0x5C,0x3A,0x32,
-                0xA4,0x0D,0x45,0x4D,0xCD,0x65,0x18,0x2D,0x18,0xB8,0xF7,0x16,0xDB,0x51,0x84,0x09,0x60,0x68,0x66,0x98,0x37,0xFE,0x38,
-                0xA9,0x1C,0x2C,0xA6,0xD3,0x4D,0xFA,0x87,0xCD,0x89,0xAE,0xC1,0xD4,0x86,0xD2,0x29,0xF7,0xB7,0x18,0x5F,0x19,0xEC,0x10,
-                0xF9,0x0F,0xBD,0x3C,0x8B,0xF0,0x73,0x24,0xA3,0x50,0x1F,0xC4,0x48,0xAA,0xD8,0x08,0x11,0x3D,0x29,0x22,0xA9,0xAE,0x4D,
-                0x32,0xF2,0x7E,0xE7,0xE6,0x64,0x38,0x92,0x92,0x68,0x72,0x4F,0x97,0x00,0x35,0x7A,0x8D,0x46,0x9B,0x29,0x98,0xD2,0x8F,
-                0x71,0x02,0x03,0x01,0x00,0x01};*/
-                
+            //Console.WriteLine("Authentication hash: {0}", Server.ServerHash);
+            
             byte[] publicKey = PacketCryptography.PublicKeyToAsn1(Server.ServerKey);
+            //byte[] publicKey = AsnKeyBuilder.PublicKeyToX509(Server.ServerKey).GetBytes();
+            //byte[] publicKey = PacketCryptography.PublicKeyToAsn1((RsaKeyParameters) Server.ServerKey.Public);
             short keyLength = (short)publicKey.Length;
             byte[] token = PacketCryptography.GetRandomToken();
             short tokenLength = (short)token.Length;
+            
+            Console.WriteLine("Public Key Length: {0}", keyLength);
+            Console.WriteLine("Public Key: {0}", BitConverter.ToString(publicKey));
+            Console.WriteLine("Token Length: {0}", tokenLength);
+            Console.WriteLine("Token: {0}", BitConverter.ToString(token));
+            Console.WriteLine("");
             Send_Sync_Packet(new EncryptionKeyRequest
                                  {
-                                     ServerId = Server.ServerHash,
+                                     ServerId = ConnectionId,
                                      PublicKey = publicKey,
                                      PublicKeyLength = keyLength,
                                      VerifyToken = token,
@@ -355,73 +371,69 @@ namespace Chraft.Net
             }
 
             SendLoginRequest();
-            SendSpawnPosition(false);
+            
             SendInitialTime(false);
             _player.UpdateChunks(4, CancellationToken.None, true, false);
-            SendInitialPosition(false);            
-        }
-
-        internal void SendSecondLoginSequence()
-        {           
+            SendSpawnPosition(false);
+            SendInitialPosition(false);
             SendInitialTime(false);
             SetGameMode();
             _player.InitializeInventory();
             _player.InitializeHealth();
             _player.OnJoined();
             Server.AddEntity(_player, false);
-            Server.AddAuthenticatedClient(this);  
+            Server.AddAuthenticatedClient(this);
             SendMotd();
-
             StartKeepAliveTimer();
             _player.UpdateEntities();
             Server.SendEntityToNearbyPlayers(_player.World, _player);
             Server.FreeConnectionSlot();
         }
 
+        internal void SendSecondLoginSequence()
+        {           
+            
+            
+
+            
+        }
+
         #endregion
 
         #region Chunks
 
-        internal void SendChunk(Chunk chunk, bool sync)
+        internal void SendChunk(Chunk chunk)
         {
-            if (!sync)
+            ChunksToBeSent.Enqueue(chunk);
+            int newValue = Interlocked.Increment(ref _chunkTimerRunning);
+
+            if (newValue == 1)
             {
-                ChunksToBeSent.Enqueue(chunk);
-                int newValue = Interlocked.Increment(ref _chunkTimerRunning);
+                if (_lastChunkTimerStart != DateTime.MinValue)
+                    _startDelay = 1000 - (int)(DateTime.Now - _lastChunkTimerStart).TotalMilliseconds;
 
-                if (newValue == 1)
-                {
-                    if (_lastChunkTimerStart != DateTime.MinValue)
-                        _startDelay = 1000 - (int)(DateTime.Now - _lastChunkTimerStart).TotalMilliseconds;
+                if (_startDelay < 0)
+                    _startDelay = 0;
 
-                    if (_startDelay < 0)
-                        _startDelay = 0;
-
-                    if(_chunkSendTimer != null)
-                        _chunkSendTimer.Change(_startDelay, 1000);
-                }
+                if(_chunkSendTimer != null)
+                    _chunkSendTimer.Change(_startDelay, 1000);
             }
-            else
-                Send_Sync_Packet(new MapChunkPacket
-                {
-                    Chunk = chunk,
-                    Logger = Logger
-                });
         }
 
         internal void SendChunks(object state)
         {
+            MapChunkBulkPacket packet = new MapChunkBulkPacket();
             for (int i = 0; i < 20 && !ChunksToBeSent.IsEmpty; ++i)
             {
                 Chunk chunk;
                 ChunksToBeSent.TryDequeue(out chunk);
 
-                SendPacket(new MapChunkPacket
-                {
-                    Chunk = chunk,
-                    Logger = Logger
-                });
+                packet.ChunksToSend.Add(chunk);
+
+                
             }
+
+            SendPacket(packet);
 
             if (ChunksToBeSent.IsEmpty)
             {

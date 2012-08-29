@@ -1,8 +1,23 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+#region C#raft License
+// This file is part of C#raft. Copyright C#raft Team 
+// 
+// C#raft is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+// 
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+#endregion
+using System;
 using System.Security.Cryptography;
+
+// This code has been written using SirCmpwn Chraft.Net as a reference. Thanks to him.
 
 namespace Chraft.Net
 {
@@ -12,20 +27,67 @@ namespace Chraft.Net
            It's 1 byte Sequence Tag, 1 byte Sequence Length, 1 byte Oid Tag, 1 byte Oid Length, 9 bytes Oid, 1 byte Null Tag, 1 byte Null */
         private static byte[] algorithmId = new byte[] { 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00 };
 
-        private static RSACryptoServiceProvider _provider = new RSACryptoServiceProvider(1024);
-        public static RSAParameters GeneratePublicKey()
+        private static RSACryptoServiceProvider _provider;
+        public static byte[] VerifyToken { get; set; }
+ 
+        public static string JavaHexDigest(byte[] data)
         {
-            return _provider.ExportParameters(true);
+            SHA1 sha1 = SHA1.Create();
+            byte[] hash = sha1.ComputeHash(data);
+            bool negative = (hash[0] & 0x80) == 0x80;
+            if (negative) // check for negative hashes
+                hash = TwosCompliment(hash);
+            // Create the string and trim away the zeroes
+            string digest = GetHexString(hash).Trim('0');
+            if (negative)
+                digest = "-" + digest;
+            return digest;
         }
 
-        public static RSAParameters GeneratePrivateKey()
+        private static string GetHexString(byte[] p)
         {
+            string result = "";
+            for (int i = 0; i < p.Length; i++)
+            {
+                if (p[i] < 0x10)
+                    result += "0";
+                result += p[i].ToString("x"); // Converts to hex string
+            }
+            return result;
+        }
+
+        private static byte[] TwosCompliment(byte[] p) // little endian
+        {
+            int i;
+            bool carry = true;
+            for (i = p.Length - 1; i >= 0; i--)
+            {
+                p[i] = (byte)~p[i];
+                if (carry)
+                {
+                    carry = p[i] == 0xFF;
+                    p[i]++;
+                }
+            }
+            return p;
+        }
+
+        public static RSAParameters GenerateKeyPair()
+        {
+            if (_provider == null)
+                _provider = new RSACryptoServiceProvider(1024);
+
             return _provider.ExportParameters(true);
         }
 
         public static byte[] Decrypt(byte[] toDecrypt)
         {
             return _provider.Decrypt(toDecrypt, false);
+        }
+
+        public static byte[] Encrypt(byte[] toDecrypt)
+        {
+            return _provider.Encrypt(toDecrypt, false);
         }
 
         public static RijndaelManaged GenerateAES(byte[] key)
@@ -35,6 +97,8 @@ namespace Chraft.Net
             cipher.Padding = PaddingMode.None;
             cipher.KeySize = 128;
             cipher.FeedbackSize = 8;
+            cipher.BlockSize = 128;
+   
             cipher.Key = key;
             cipher.IV = key;
 
@@ -46,12 +110,13 @@ namespace Chraft.Net
             byte[] token = new byte[4];
             RNGCryptoServiceProvider provider = new RNGCryptoServiceProvider();
             provider.GetBytes(token);
-
+            VerifyToken = token;
             return token;
         }
 
         public static byte[] PublicKeyToAsn1(RSAParameters parameters)
         {
+            
             // Oid - Tag: 0x06 - Length: 0x09 - Octets: 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01
             // AlgorithmId - Tag: 0x30 - Length: 0x0D - Octets: 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00
 

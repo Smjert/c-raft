@@ -91,10 +91,21 @@ namespace Chraft.Net
             set { _fragPackets = value; }
         }
 
+        public bool ToDisconnect { get; set; }
+
         /// <summary>
         /// A reference to the server logger.
         /// </summary>
         internal Logger Logger { get { return Server.Logger; } }
+
+        internal byte[] SharedKey { get; set; }
+        internal ICryptoTransform Encrypter { get; set; }
+        internal ICryptoTransform Decrypter { get; set; }
+
+        /// <summary>
+        /// A unique Id used as the ServerId within the Authentication process
+        /// </summary>
+        internal string ConnectionId { get; set; }
 
         internal byte[] SharedKey { get; set; }
         internal ICryptoTransform Encrypter { get; set; }
@@ -112,6 +123,12 @@ namespace Chraft.Net
             _nextActivityCheck = DateTime.Now + TimeSpan.FromSeconds(10);
             SessionID = sessionId;
             Server = server;
+            
+            // Generate a unique ServerId for each client
+            byte[] bytes = new byte[8];
+            Server.Rand.NextBytes(bytes);
+            ConnectionId = BitConverter.ToString(bytes).Replace("-", "");
+
             _chunkSendTimer = new Timer(SendChunks, null, Timeout.Infinite, Timeout.Infinite);
             //PacketHandler = new PacketHandler(Server, socket);
         }

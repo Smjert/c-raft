@@ -39,7 +39,6 @@ namespace Chraft.Net
             m_Handlers = new PacketHandler[0x100];
 
             Register(PacketType.KeepAlive, 5, 0, ReadKeepAlive);
-            Register(PacketType.LoginRequest, 0, 23, ReadLoginRequest);
             Register(PacketType.Handshake, 0, 10, ReadHandshake);
             Register(PacketType.ChatMessage, 0, 3, ReadChatMessage);
             Register(PacketType.UseEntity, 10, 0, ReadUseEntity);
@@ -84,15 +83,6 @@ namespace Chraft.Net
 
             if (!reader.Failed)
                 Client.HandlePacketKeepAlive(client, ka);
-        }
-
-        public static void ReadLoginRequest(Client client, PacketReader reader)
-        {
-            LoginRequestPacket lr = new LoginRequestPacket();
-            lr.Read(reader);
-
-            if (!reader.Failed)
-                Client.HandlePacketLoginRequest(client, lr);
         }
 
         public static void ReadHandshake(Client client, PacketReader reader)
@@ -299,7 +289,7 @@ namespace Chraft.Net
             lvd.Read(reader);
 
             if(!reader.Failed)
-                Client.HandleLocaleAndViewDistance(client, lvd);
+                Client.HandlePacketLocaleAndViewDistance(client, lvd);
         }
 
         public static void ReadClientStatus(Client client, PacketReader reader)
@@ -308,7 +298,7 @@ namespace Chraft.Net
             csp.Read(reader);
 
             if(!reader.Failed)
-                Client.HandleClientStatus(client, csp);
+                Client.HandlePacketClientStatus(client, csp);
         }
 
         public static void ReadEncryptionResponse(Client client, PacketReader reader)
@@ -317,7 +307,7 @@ namespace Chraft.Net
             ekr.Read(reader);
 
             if(!reader.Failed)
-                Client.HandleEncryptionResponse(client, ekr);
+                Client.HandlePacketEncryptionResponse(client, ekr);
         }
     }
 }

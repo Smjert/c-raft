@@ -18,6 +18,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -48,7 +49,6 @@ using Chraft.Utils;
 using Chraft.World;
 using Chraft.Entity;
 using Chraft.Net;
-using Chraft.Irc;
 using Chraft.World.Blocks;
 using ICSharpCode.SharpZipLib.Zip.Compression;
 
@@ -149,6 +149,11 @@ namespace Chraft
         internal Logger Logger { get; private set; }
 
         /// <summary>
+        /// Gets the server Logger instance for console and file logging.
+        /// </summary>
+        internal PluginLogger PluginLogger { get; private set; }
+
+        /// <summary>
         /// Gets user-chosen item names, numerics, and durabilities.
         /// </summary>
         internal ItemDb Items { get; private set; }
@@ -164,11 +169,6 @@ namespace Chraft
         internal static SmeltingRecipe[] SmeltingRecipes { get; private set; }
 
         /// <summary>
-        /// Gets the IRC client, if it has been initialized.
-        /// </summary>
-        internal IrcClient Irc { get; private set; }
-
-        /// <summary>
         /// Gets the server hash. Used for authentication, guaranteed to be unique between instances
         /// </summary>
         public string ServerHash { get; private set; }
@@ -178,10 +178,18 @@ namespace Chraft
         /// </summary>
         public bool UseOfficalAuthentication { get; private set; }
 
+        /// <summary>
+        /// Determines whether to use the official minecraft encryption or none
+        /// </summary>
+        public bool EncryptionEnabled { get; private set; }
+
+        public bool EnableUserSightRadius { get; private set; }
+
         public int ClientsConnectionSlots;
 
         public RSAParameters ServerKey;
-        public bool EncryptionEnabled = true;
+        public byte[] VerifyToken;
+        
         
         public Server()
         {
@@ -189,20 +197,20 @@ namespace Chraft
             ClientsConnectionSlots = 30;
             Packet.Role = StreamRole.Server;
             Rand = new Random();
-            ServerHash = GetRandomServerHash();
             UseOfficalAuthentication = ChraftConfig.UseOfficalAuthentication;
+            ServerHash = GetRandomServerHash();
+            EncryptionEnabled = ChraftConfig.EncryptionEnabled;
+            EnableUserSightRadius = ChraftConfig.EnableUserSightRadius;
             Clients = new ConcurrentDictionary<int, Client>();
             AuthClients = new ConcurrentDictionary<int, Client>();
             Logger = new Logger(this, ChraftConfig.LogFile);
+            PluginLogger = new PluginLogger(Logger);
             PluginManager = new PluginManager(this, ChraftConfig.PluginFolder);
             Items = new ItemDb(ChraftConfig.ItemsFile);
             Recipes = Recipe.FromXmlFile(ChraftConfig.RecipesFile);
             SmeltingRecipes = SmeltingRecipe.FromFile(ChraftConfig.SmeltingRecipesFile);
             ClientCommandHandler = new ClientCommandHandler();
             ServerCommandHandler = new ServerCommandHandler();
-            if (ChraftConfig.IrcEnabled)
-                InitializeIrc();
-
             PacketMap.Initialize();
 
             _AcceptEventArgs = new SocketAsyncEventArgs();
@@ -219,7 +227,9 @@ namespace Chraft
             PlayersToSavePostponed = new ConcurrentQueue<Client>();
             _generators = new Dictionary<string, IChunkGenerator>();
 
-            ServerKey = PacketCryptography.GeneratePublicKey();
+
+            ServerKey = PacketCryptography.GenerateKeyPair();
+
         }
 
         public IPluginManager GetPluginManager()
@@ -245,6 +255,11 @@ namespace Chraft
             return _generators[name];
         }
 
+        public IPluginLogger GetPluginLogger()
+        {
+            return PluginLogger;
+        }
+
         public ILogger GetLogger()
         {
             return Logger;
@@ -262,6 +277,9 @@ namespace Chraft
 
         internal string GetRandomServerHash()
         {
+            if (!UseOfficalAuthentication)
+                return "-";
+
             byte[] bytes = new byte[8];
             Rand.NextBytes(bytes);
 
@@ -278,51 +296,6 @@ namespace Chraft
         {
             lock (SmeltingRecipes)
                 return SmeltingRecipes;
-        }
-
-        private void InitializeIrc()
-        {
-            IPEndPoint ep = new IPEndPoint(Dns.GetHostEntry(ChraftConfig.IrcServer).AddressList[0], ChraftConfig.IrcPort);
-            Irc = new IrcClient(ep, ChraftConfig.IrcNickname);
-            Irc.Received += new IrcEventHandler(Irc_Received);
-        }
-
-        private void Irc_Received(object sender, IrcEventArgs e)
-        {
-            if (e.Handled)
-                return;
-
-            switch (e.Command)
-            {
-                case "PRIVMSG": OnIrcPrivMsg(sender, e); break;
-                case "NOTICE": OnIrcNotice(sender, e); break;
-                case "001": OnIrcWelcome(sender, e); break;
-            }
-        }
-
-        private void OnIrcPrivMsg(object sender, IrcEventArgs e)
-        {
-            for (int i = 0; i < e.Args[1].Length; i++)
-                if (!ChraftConfig.AllowedChatChars.Contains(e.Args[1][i]))
-                    return;
-
-            Broadcast("§7[IRC] " + e.Prefix.Nickname + ":§f " + e.Args[1], sendToIrc: false);
-            e.Handled = true;
-        }
-
-        private void OnIrcNotice(object sender, IrcEventArgs e)
-        {
-            for (int i = 0; i < e.Args[1].Length; i++)
-                if (!ChraftConfig.AllowedChatChars.Contains(e.Args[1][i]))
-                    return;
-
-            Broadcast("§c[IRC] " + e.Prefix.Nickname + ":§f " + e.Args[1], sendToIrc: false);
-            e.Handled = true;
-        }
-
-        private void OnIrcWelcome(object sender, IrcEventArgs e)
-        {
-            Irc.Join(ChraftConfig.IrcChannel);
         }
 
         internal void Run()
@@ -565,6 +538,20 @@ namespace Chraft
                     client.Decrypter.TransformBlock(bufferToProcess.UnderlyingBuffer, 0,
                                                 bufferToProcess.UnderlyingBuffer.Length,
                                                 bufferToProcess.UnderlyingBuffer, 0);
+                byte[] decryptedData = null;
+
+                if (client.Decrypter != null)
+                {
+                    decryptedData = new byte[bufferToProcess.Length];
+
+                    client.Decrypter.TransformBlock(bufferToProcess.UnderlyingBuffer, 0, bufferToProcess.Length, decryptedData, 0);
+                    
+                    bufferToProcess.Clear();
+                    bufferToProcess.Enqueue(decryptedData, 0, decryptedData.Length);
+                    decryptedData = null;
+                }
+                
+
                 int length = client.FragPackets.Size + bufferToProcess.Size;
                 while (length > 0)
                 {
@@ -596,7 +583,7 @@ namespace Chraft
                         if (length >= handler.MinimumLength)
                         {
                             PacketReader reader = new PacketReader(data, length);
-
+                            
                             handler.OnReceive(client, reader);
 
                             // If we failed it's because the packet isn't complete
@@ -816,7 +803,7 @@ namespace Chraft
         /// </summary>
         /// <param name="message">The message to be broadcasted.</param>
         /// <param name="excludeClient">The client to excluded; usually the sender.</param>
-        public void Broadcast(string message, IClient excludeClient = null, bool sendToIrc = true)
+        public void Broadcast(string message, IClient excludeClient = null)
         {
             //Event
             ServerBroadcastEventArgs e = new ServerBroadcastEventArgs(this, message, excludeClient);
@@ -831,11 +818,6 @@ namespace Chraft
                 if (c != excludeClient)
                     c.SendMessage(message);
             }
-
-            if (sendToIrc && Irc != null)
-            {
-                Irc.WriteLine("PRIVMSG {0} :{1}", ChraftConfig.IrcChannel, message.Replace('§', '\x3'));
-            }
         }
 
         /// <summary>
@@ -843,7 +825,7 @@ namespace Chraft
         /// </summary>
         /// <param name="message">The message to be broadcasted.</param>
         /// <param name="excludeClient">The client to excluded; usually the sender.</param>
-        public void BroadcastSync(string message, IClient excludeClient = null, bool sendToIrc = true)
+        public void BroadcastSync(string message, IClient excludeClient = null)
         {
             //Event
             ServerBroadcastEventArgs e = new ServerBroadcastEventArgs(this, message, excludeClient);
@@ -862,10 +844,7 @@ namespace Chraft
                 }
             }
 
-            if (sendToIrc && Irc != null)
-            {
-                Irc.WriteLine("PRIVMSG {0} :{1}", ChraftConfig.IrcChannel, message.Replace('§', '\x3'));
-            }
+            
         }
 
         /// <summary>
@@ -1043,7 +1022,8 @@ namespace Chraft
                     Yaw = p.PackedYaw,
                     Pitch = p.PackedPitch,
                     PlayerName = p.Client.Username + p.EntityId,
-                    CurrentItem = 0
+                    CurrentItem = 0,
+                    Data = new MetaData()
                 };
             }
             else if (entity is ItemEntity)
@@ -1155,7 +1135,7 @@ namespace Chraft
                 {
                     foreach (Packet packet in packets)
                         packet.Release();
-                }
+                }           
             });
         }
 
@@ -1174,7 +1154,7 @@ namespace Chraft
                         {
                             EntityId = entity.EntityId,
                             Slot = i,
-                            Item = ItemStack.Void
+                            Item = ItemStack.Void,
                         });
                     }
 
@@ -1233,7 +1213,7 @@ namespace Chraft
         /// <returns>A lazy enumerable of nearby players.</returns>
         internal IEnumerable<Client> GetNearbyPlayersInternal(WorldManager world, UniversalCoords coords)
         {
-            int radius = ChraftConfig.SightRadius;
+            int radius = ChraftConfig.MaxSightRadius;
             foreach (Client c in GetAuthenticatedClients())
             {
                 int playerChunkX = (int)Math.Floor(c.Owner.Position.X) >> 4;
@@ -1271,7 +1251,7 @@ namespace Chraft
         /// <returns>A lazy enumerable of nearby entities.</returns>
         internal IEnumerable<EntityBase> GetNearbyEntitiesInternal(WorldManager world, UniversalCoords coords)
         {
-            int radius = ChraftConfig.SightRadius;
+            int radius = ChraftConfig.MaxSightRadius;
 
             foreach (EntityBase e in GetEntities())
             {
@@ -1299,7 +1279,7 @@ namespace Chraft
         /// <returns>A lazy enumerable of nearby entities.</returns>
         public Dictionary<int, IEntityBase> GetNearbyEntitiesDict(IWorldManager world, UniversalCoords coords)
         {
-            int radius = ChraftConfig.SightRadius;
+            int radius = ChraftConfig.MaxSightRadius;
 
             Dictionary<int, IEntityBase> dict = new Dictionary<int, IEntityBase>();
 
@@ -1340,7 +1320,7 @@ namespace Chraft
 
         internal IEnumerable<LivingEntity> GetNearbyLivingsInternal(WorldManager world, UniversalCoords coords)
         {
-            int radius = ChraftConfig.SightRadius;
+            int radius = ChraftConfig.MaxSightRadius;
             foreach (EntityBase entity in GetEntities())
             {
                 if (!(entity is LivingEntity))
@@ -1468,9 +1448,6 @@ namespace Chraft
             foreach (WorldManager w in GetWorlds())
                 w.Dispose();
             Running = false;
-
-            if (Irc != null)
-                Irc.Stop();
 
             Logger.Log(LogLevel.Info, "Server stopped, press enter to exit");
             Console.ReadLine();

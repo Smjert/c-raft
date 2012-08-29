@@ -83,7 +83,7 @@ namespace Chraft.Net
 
             byte[] input = new byte[Count];
 
-            Buffer.BlockCopy(_Data, 0, input, 0, Count);
+            Buffer.BlockCopy(_Data, _Index, input, 0, Count);
             _Index += Count;
             /*for (int i = Count - 1; i >= 0; i--)
             {
