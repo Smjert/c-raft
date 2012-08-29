@@ -1,4 +1,4 @@
-#region C#raft License
+﻿#region C#raft License
 // This file is part of C#raft. Copyright C#raft Team 
 // 
 // C#raft is free software: you can redistribute it and/or modify

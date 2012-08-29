@@ -16,6 +16,8 @@ namespace Chraft.World
         public static readonly int HALFSIZE = 16*16*8;
         public static readonly int SIZE = HALFSIZE*2;
         public static readonly int BYTESIZE = SIZE + SIZE + HALFSIZE;
+
+        public int SectionId { get; private set; }
         
         internal NibbleArray Data = new NibbleArray(HALFSIZE);
         
@@ -29,10 +31,11 @@ namespace Chraft.World
             set { _NonAirBlocks = value; }
         }
 
-        public Section(Chunk parent)
+        public Section(Chunk parent, int sectionId)
         {
             _Parent = parent;
             _NonAirBlocks = 0;
+            SectionId = sectionId;
         }
 
         internal unsafe byte this[UniversalCoords coords]

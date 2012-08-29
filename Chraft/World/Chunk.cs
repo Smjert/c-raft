@@ -25,6 +25,7 @@ using Chraft.Net;
 using Chraft.PluginSystem;
 using Chraft.PluginSystem.Entity;
 using Chraft.PluginSystem.Net;
+using Chraft.PluginSystem.Server;
 using Chraft.PluginSystem.World;
 using Chraft.PluginSystem.World.Blocks;
 using Chraft.Utilities;
@@ -97,15 +98,9 @@ namespace Chraft.World
         public UniversalCoords Coords { get; set; }
 
         private Section[] _Sections;
-        private int _SectionsNum;
         private int _MaxSections;
 
         private byte[] _BiomesArray = new byte[256];
-
-        public int SectionsNum
-        {
-            get { return _SectionsNum; }
-        }
 
         public int MaxSections
         {
@@ -444,9 +439,8 @@ namespace Chraft.World
 
         public Section AddNewSection(int pos)
         {
-            Section section = new Section(this);
+            Section section = new Section(this, pos);
             _Sections[pos] = section;
-            ++_SectionsNum;
 
             return section;
         }
@@ -565,6 +559,9 @@ namespace Chraft.World
             if (state == 1)
                 return;
 
+            watch.Reset();
+            watch.Start();
+
             for (int x = 0; x < 16; x++)
             {
                 for (int z = 0; z < 16; z++)
@@ -583,11 +580,15 @@ namespace Chraft.World
                 {
                     // TODO: check if lightupdate type is sky or block and call the correct spread function
                     chunkUpdate.Chunk.StackSize = 0;
-                    chunkUpdate.Chunk.SpreadInitialSkyLightFromBlock((byte)chunkUpdate.X, (byte)chunkUpdate.Y, (byte)chunkUpdate.Z, false);
+                    chunkUpdate.Chunk.SpreadInitialSkyLightFromBlock2((byte)chunkUpdate.X, (byte)chunkUpdate.Y, (byte)chunkUpdate.Z, SpreadDirection.DOWN);
                 }
             }
 
             LightToRecalculate = false;
+
+            watch.Stop();
+
+            World.Logger.Log(LogLevel.Info, "Lighting Chunk {0}, {1} {2}ms", Coords.ChunkX, Coords.ChunkZ, watch.ElapsedMilliseconds);
 
             MarkToSave();
         }
@@ -605,90 +606,80 @@ namespace Chraft.World
                 if (sky < 0)
                     sky = 0;
 
-                SetSkyLight(x,y,z,(byte)sky);
-                
-                if(y <= MaxHeight)
-                    SpreadInitialSkyLightFromBlock((byte)x, y, (byte)z, false);
+                SetSkyLight(x, y, z, (byte)sky);
+
+                /*if (y <= MaxHeight)
+                    SpreadInitialSkyLightFromBlock2((byte)x, y, (byte)z, SpreadDirection.NONE);*/
             }
             while (--y > 0 && sky > 0);
         }
 
-        
-
-        private void CheckNeighbourHeightAndLight(byte x, byte y, byte z, byte[] skylights, byte[] heights, BitArray directionChunkExist)
+        private void CheckNeighbourHeightAndLight(byte x, byte y, byte z, sbyte[] skylights, byte[] heights, BitArray directionChunkExist, Chunk[] chunks)
         {
-            int chunkX = Coords.ChunkX;
-            int chunkZ = Coords.ChunkZ;
-            Chunk chunk;
             // Take the skylight value of our neighbor blocks
+
+            // Right
+            if (x < 15)
+            {
+                skylights[1] = (sbyte)GetSkyLight(x + 1, y, z);
+                heights[1] = HeightMap[x + 1, z];
+            }
+            else if (directionChunkExist[0])
+            {
+                skylights[1] = (sbyte)chunks[0].GetSkyLight((x + 1) & 0xF, y, z);
+                heights[1] = chunks[0].HeightMap[(x + 1) & 0xF, z];
+            }
+
             // Left
             if (x > 0)
             {
-                skylights[1] = GetSkyLight((x - 1), y, z);
-                heights[1] = HeightMap[x - 1, z];
+                skylights[2] = (sbyte)GetSkyLight((x - 1), y, z);
+                heights[2] = HeightMap[x - 1, z];
             }
-            else if ((chunk = World.GetChunkFromChunkSync(chunkX - 1, chunkZ, false, true) as Chunk) != null)
+            else if (directionChunkExist[1])
             {
-                skylights[1] = chunk.GetSkyLight((x - 1) & 0xf, y, z);
-                heights[1] = chunk.HeightMap[(x - 1) & 0xf, z];
-                directionChunkExist[0] = true;
+                skylights[2] = (sbyte)chunks[1].GetSkyLight((x - 1) & 0xF, y, z);
+                heights[2] = chunks[1].HeightMap[(x - 1) & 0xF, z];
             }
 
-            // Right
+            // Front
 
-            if (x < 15)
+            if (z < 15)
             {
-                skylights[2] = GetSkyLight(x + 1, y, z);
-                heights[2] = HeightMap[x + 1, z];
+                skylights[3] = (sbyte)GetSkyLight(x, y, z + 1);
+                heights[3] = HeightMap[x, z + 1];
             }
-            else if ((chunk = World.GetChunkFromChunkSync(chunkX + 1, chunkZ, false, true) as Chunk) != null)
+            else if (directionChunkExist[2])
             {
-                skylights[2] = (byte)chunk.GetSkyLight((x + 1) & 0xf, y, z);
-                heights[2] = chunk.HeightMap[(x + 1) & 0xf, z];
-                directionChunkExist[1] = true;
+                skylights[3] = (sbyte)chunks[2].GetSkyLight(x, y, (z + 1) & 0xF);
+                heights[3] = chunks[2].HeightMap[x, (z + 1) & 0xF];
             }
 
             // Back
 
             if (z > 0)
             {
-                skylights[3] = GetSkyLight(x, y, z - 1);
-                heights[3] = HeightMap[x, z - 1];
+                skylights[4] = (sbyte)GetSkyLight(x, y, z - 1);
+                heights[4] = HeightMap[x, z - 1];
             }
-            else if ((chunk = World.GetChunkFromChunkSync(chunkX, chunkZ - 1, false, true) as Chunk) != null)
+            else if (directionChunkExist[3])
             {
-                skylights[3] = chunk.GetSkyLight(x, y, (z - 1) & 0xf);
-                heights[3] = chunk.HeightMap[x, (z - 1) & 0xf];
-                directionChunkExist[2] = true;
-            }
-
-
-            // Front
-
-            if (z < 15)
-            {
-                skylights[4] = GetSkyLight(x, y, z + 1);
-                heights[4] = HeightMap[x, z + 1];
-            }
-            else if ((chunk = World.GetChunkFromChunkSync(chunkX, chunkZ + 1, false, true) as Chunk) != null)
-            {
-                skylights[4] = chunk.GetSkyLight(x, y, (z + 1) & 0xf);
-                heights[4] = chunk.HeightMap[x, (z + 1) & 0xf];
-                directionChunkExist[3] = true;
+                skylights[4] = (sbyte)chunks[3].GetSkyLight(x, y, (z - 1) & 0xF);
+                heights[4] = chunks[3].HeightMap[x, (z - 1) & 0xF];
             }
 
             // Up
-            skylights[5] = GetSkyLight(x, y + 1, z);
+            skylights[5] = (sbyte)GetSkyLight(x, y + 1, z);
 
             // Down
             if (y > 0)
-                skylights[6] = GetSkyLight(x, y - 1, z);
+                skylights[6] = (sbyte)GetSkyLight(x, y - 1, z);
         }
 
         private byte ChooseHighestHeight(byte[] heights)
         {
             byte maxHeight = heights[0];
-           
+
             if (heights[1] > maxHeight)
                 maxHeight = heights[1];
 
@@ -700,48 +691,287 @@ namespace Chraft.World
 
             if (heights[4] > maxHeight)
                 maxHeight = heights[4];
-            
+
 
             return maxHeight;
         }
 
-        private byte ChooseHighestNeighbourLight(byte[] lights, out byte vertical)
+        private void CheckNeighbourLight(byte x, byte y, byte z, sbyte[] skylights, BitArray directionChunkExist, Chunk[] chunks)
         {
-            vertical = 0;
-
-            // Left
-            byte newLight = lights[1];
-
             // Right
-            if (lights[2] > newLight)
-                newLight = lights[2];
-
-            // Back
-            if (lights[3] > newLight)
-                newLight = lights[3];
+            if (x < 15)
+                skylights[1] = (sbyte)GetSkyLight(x + 1, y, z);            
+            else if (directionChunkExist[0])
+                skylights[1] = (sbyte)chunks[0].GetSkyLight((x + 1) & 0xf, y, z);
+  
+            // Left
+            if (x > 0)
+                skylights[2] = (sbyte)GetSkyLight((x - 1), y, z);             
+            else if (directionChunkExist[1])
+                skylights[2] = (sbyte)chunks[1].GetSkyLight((x - 1) & 0xf, y, z);
 
             // Front
+
+            if (z < 15)
+                skylights[3] = (sbyte)GetSkyLight(x, y, z + 1);               
+            else if (directionChunkExist[2])
+                skylights[3] = (sbyte)chunks[2].GetSkyLight(x, y, (z + 1) & 0xf);
+               
+            // Back
+
+            if (z > 0)
+                skylights[4] = (sbyte)GetSkyLight(x, y, z - 1);
+            else if (directionChunkExist[3])
+                skylights[4] = (sbyte)chunks[3].GetSkyLight(x, y, (z - 1) & 0xf);
+            
+            // Up
+            skylights[5] = (sbyte)GetSkyLight(x, y + 1, z);
+
+            // Down
+            if (y > 0)
+                skylights[6] = (sbyte)GetSkyLight(x, y - 1, z);
+        }
+
+        private sbyte ChooseHighestNeighbourLight(sbyte[] lights)
+        {           
+            sbyte newLight = lights[0];
+            bool currentBlockIsHighestOrVertical = true;
+
+            // Right
+            if (lights[1] > newLight)
+            {
+                newLight = lights[1];
+                currentBlockIsHighestOrVertical = false;
+            }
+
+            // Left
+            if (lights[2] > newLight)
+            {
+                newLight = lights[2];
+                currentBlockIsHighestOrVertical = false;
+            }
+
+            // Front
+            if (lights[3] > newLight)
+            {
+                newLight = lights[3];
+                currentBlockIsHighestOrVertical = false;
+            }
+
+            // Back
             if (lights[4] > newLight)
+            {
                 newLight = lights[4];
+                currentBlockIsHighestOrVertical = false;
+            }
 
             // Up
             if ((lights[5] + 1) > newLight)
-            {
                 newLight = lights[5];
-                vertical = 1;
-            }
+            
 
             // Down
             if (lights[6] > newLight)
             {
                 newLight = lights[6];
+                currentBlockIsHighestOrVertical = false;
             }
+
+            if (!currentBlockIsHighestOrVertical)
+                --newLight;
 
             return newLight;
 
         }
 
-        private void SpreadInitialSkyLightFromBlock(byte x, byte y, byte z, bool checkChange = true)
+        private void CheckExistingNeighbourChunks(BitArray directionChunkExist, Chunk[] chunks)
+        {
+            int chunkX = Coords.ChunkX;
+            int chunkZ = Coords.ChunkZ;
+
+            if((chunks[0] = World.GetChunkFromChunkSync(chunkX + 1, chunkZ, false, true) as Chunk) != null)
+                directionChunkExist.Set(0, true);
+
+            if((chunks[1] = World.GetChunkFromChunkSync(chunkX - 1, chunkZ, false, true) as Chunk) != null)
+                directionChunkExist.Set(1, true);
+
+            if ((chunks[2] = World.GetChunkFromChunkSync(chunkX, chunkZ + 1, false, true) as Chunk) != null)
+                directionChunkExist.Set(2, true);
+
+            if ((chunks[3] = World.GetChunkFromChunkSync(chunkX, chunkZ - 1, false, true) as Chunk) != null)
+                directionChunkExist.Set(3, true);
+        }
+
+        private void SpreadInitialSkyLightFromBlock2(byte x, byte y, byte z, SpreadDirection dir)
+        {
+            if (StackSize > 100)
+            {
+                World.InitialChunkLightToRecalculate.Enqueue(new ChunkLightUpdate(this, x, y, z));
+                return;
+            }
+
+            sbyte[] skylights = new sbyte[7]{0, 0, 0, 0, 0, 0, 0};
+            byte[] heights = new byte[5]{0, 0, 0, 0, 0};
+            sbyte newSkylight = 0;
+
+            Chunk[] chunks = new Chunk[4];         
+
+            BitArray directionChunkExist = new BitArray(4);
+            directionChunkExist.SetAll(false);
+
+            CheckExistingNeighbourChunks(directionChunkExist, chunks);
+
+            skylights[0] = (sbyte)GetSkyLight(x, y, z);
+            heights[0] = HeightMap[x, z];
+
+            CheckNeighbourHeightAndLight(x, y, z, skylights, heights, directionChunkExist, chunks);
+
+            byte opacity = BlockHelper.Instance.CreateBlockInstance((byte)GetType(x, z, y)).Opacity;
+            
+            newSkylight = ChooseHighestNeighbourLight(skylights);
+
+            newSkylight = (sbyte)(newSkylight - opacity);
+
+            if (newSkylight < 0)
+                newSkylight = 0;
+
+            SetSkyLight(x, y, z, (byte)newSkylight);
+
+            --newSkylight;
+
+            if (x < 15)
+            {
+                if (skylights[1] < newSkylight && y < heights[1])
+                {
+                    ++StackSize;
+                    SpreadInitialSkyLightFromBlock2((byte) (x + 1), y, z, SpreadDirection.RIGHT);
+                    --StackSize;
+                }
+            }
+            else if (directionChunkExist[0])
+            {
+                if(skylights[1] < newSkylight && y < heights[1])
+                {
+                    World.InitialChunkLightToRecalculate.Enqueue(new ChunkLightUpdate(chunks[0], (byte)(x + 1) & 0xF, y, z));
+                }
+            }
+
+            if(dir != SpreadDirection.NONE)
+            {
+                CheckNeighbourLight(x, y, z, skylights, directionChunkExist, chunks);
+                newSkylight = (sbyte)(ChooseHighestNeighbourLight(skylights) - opacity - 1);
+            }
+
+            if (x > 0)
+            {
+                if (skylights[2] < newSkylight && y < heights[2])
+                {
+                    ++StackSize;
+                    SpreadInitialSkyLightFromBlock2((byte) (x - 1), y, z, SpreadDirection.LEFT);
+                    --StackSize;
+                }
+            }
+            else if (directionChunkExist[1])
+            {
+                if (skylights[2] < newSkylight && y < heights[2])
+                {
+                    World.InitialChunkLightToRecalculate.Enqueue(new ChunkLightUpdate(chunks[0], (byte)(x - 1) & 0xF, y, z));
+                }
+            }
+
+            if (dir != SpreadDirection.NONE)
+            {
+                CheckNeighbourLight(x, y, z, skylights, directionChunkExist, chunks);
+                newSkylight = (sbyte)(ChooseHighestNeighbourLight(skylights) - opacity - 1);
+            }
+
+            if (z < 15)
+            {
+                if (skylights[3] < newSkylight && y < heights[3])
+                {
+                    ++StackSize;
+                    SpreadInitialSkyLightFromBlock2(x, y, (byte) (z + 1), SpreadDirection.FRONT);
+                    --StackSize;
+                }
+            }
+            else if (directionChunkExist[2])
+            {
+                if (skylights[3] < newSkylight && y < heights[3])
+                {
+                    World.InitialChunkLightToRecalculate.Enqueue(new ChunkLightUpdate(chunks[0], x, y, (z + 1) & 0xF));
+                }
+            }
+
+            if (dir != SpreadDirection.NONE)
+            {
+                CheckNeighbourLight(x, y, z, skylights, directionChunkExist, chunks);
+                newSkylight = (sbyte)(ChooseHighestNeighbourLight(skylights) - opacity - 1);
+            }
+
+            if (z > 0)
+            {
+                if (skylights[4] < newSkylight && y < heights[4])
+                {
+                    ++StackSize;
+                    SpreadInitialSkyLightFromBlock2(x, y, (byte) (z - 1), SpreadDirection.BACK);
+                    --StackSize;
+                }
+            }
+            else if (directionChunkExist[3])
+            {
+                if (skylights[4] < newSkylight && y < heights[4])
+                {
+                    World.InitialChunkLightToRecalculate.Enqueue(new ChunkLightUpdate(chunks[0], x, y, (z - 1) & 0xF));
+                }
+            }
+
+            if (dir != SpreadDirection.NONE)
+            {
+                CheckNeighbourLight(x, y, z, skylights, directionChunkExist, chunks);
+                newSkylight = (sbyte)(ChooseHighestNeighbourLight(skylights) - opacity - 1);
+
+                if (y < 15)
+                {
+                    if (skylights[5] < newSkylight && (y + 1) < heights[0])
+                    {
+                        ++StackSize;
+                        SpreadInitialSkyLightFromBlock2(x, (byte) (y + 1), z, SpreadDirection.UP);
+                        --StackSize;
+                    }
+                }
+            } 
+
+            if (dir != SpreadDirection.NONE)
+            {
+                CheckNeighbourLight(x, y, z, skylights, directionChunkExist, chunks);
+                newSkylight = (sbyte)(ChooseHighestNeighbourLight(skylights) - opacity - 1);
+
+                if (y > 0)
+                {
+                    if (skylights[6] < newSkylight)
+                    {
+                        ++StackSize;
+                        SpreadInitialSkyLightFromBlock2(x, (byte) (y - 1), z, SpreadDirection.DOWN);
+                        --StackSize;
+                    }
+                }
+            }
+
+            
+        }
+
+        public enum SpreadDirection : byte
+        {
+            NONE = 0,
+            LEFT,
+            RIGHT,
+            FRONT,
+            BACK,
+            UP,
+            DOWN
+        }
+
+        /*private void SpreadInitialSkyLightFromBlock(byte x, byte y, byte z, bool checkChange = true)
         {
             if (StackSize > 200)
             {
@@ -753,7 +983,7 @@ namespace Chraft.World
             }
 
             /*if(Coords.ChunkX == -1 && Coords.ChunkZ == -5 && x == -10 && y == 87 && z == -74)
-                Console.WriteLine("asd");*/
+                Console.WriteLine("asd");
 
             BitArray directionChunkExist = new BitArray(4);
             directionChunkExist.SetAll(false);
@@ -925,9 +1155,9 @@ namespace Chraft.World
                     --StackSize;                    
                 }
             }
-        }
+        }*/
 
-        public void SpreadLightFromBlock(byte x, byte y, byte z, byte light, byte oldHeight)
+        /*public void SpreadLightFromBlock(byte x, byte y, byte z, byte light, byte oldHeight)
         {
             int newHeight = HeightMap[x, z];
             if (newHeight > oldHeight)
@@ -966,9 +1196,9 @@ namespace Chraft.World
                     chunkUpdate.Chunk.SpreadSkyLightFromBlock((byte)chunkUpdate.X, (byte)chunkUpdate.Y, (byte)chunkUpdate.Z, true);
                 }
             }
-        }
+        }*/
 
-        public void SpreadSkyLightFromBlock(byte x, byte y, byte z, bool sourceBlock=false)
+        /*public void SpreadSkyLightFromBlock(byte x, byte y, byte z, bool sourceBlock=false)
         {
             if (StackSize > 200)
             {
@@ -1140,7 +1370,7 @@ namespace Chraft.World
                 if (skylights[0] < newSkylight || (skylights[0] > newSkylight && y < heights[4]))
                     World.ChunkLightToRecalculate.Enqueue(new ChunkLightUpdate(chunk, x, y, neighborCoord & 0xf));
             } 
-        }
+        }*/
 
         private static bool CanLoad(string path)
         {
@@ -1208,39 +1438,40 @@ namespace Chraft.World
 
         }
 
-        private static byte[] _Buffer = new byte[16 * Section.BYTESIZE];
+        private static byte[] _Buffer = new byte[16 * Section.BYTESIZE + (16 * 5)];
 
         private void LoadAllBlocks(Stream strm)
         {
+            World.Server.Logger.Log(LogLevel.Info, "Loading Chunk: {0} {1}", Coords.ChunkX, Coords.ChunkZ);
             int sections = strm.ReadByte();
-            _SectionsNum = sections;
-            strm.Read(_Buffer, 0, (sections * Section.BYTESIZE) + sections);
+            World.Server.Logger.Log(LogLevel.Info, "SectionsNum: {0}", sections);
+            strm.Read(_Buffer, 0, (sections * Section.BYTESIZE) + (sections * 5));
 
             int i = 0;
+
             while(sections > 0)
             {
                 int sectionId = _Buffer[i++];
-
-                Section section = _Sections[sectionId] = new Section(this);
+                World.Server.Logger.Log(LogLevel.Info, "SectionId: {0}", sectionId);
+                Section section = _Sections[sectionId] = new Section(this, sectionId);
                 Buffer.BlockCopy(_Buffer, i, section.Types, 0, Section.SIZE);
+                World.Server.Logger.Log(LogLevel.Info, "sectionTypes: {0}", BitConverter.ToString(section.Types));
                 i += Section.SIZE;
                 Buffer.BlockCopy(_Buffer, i, section.Data.Data, 0, Section.HALFSIZE);
+                World.Server.Logger.Log(LogLevel.Info, "sectionData: {0}", BitConverter.ToString(section.Data.Data));
                 i += Section.HALFSIZE;
-                byte[] nonAirBlocks = new byte[4];
-                Buffer.BlockCopy(_Buffer, i, nonAirBlocks, 0, 4);
+                
+                section.NonAirBlocks = BitConverter.ToInt32(_Buffer, i);
+                World.Server.Logger.Log(LogLevel.Info, "NonAirBlocks: {0}", section.NonAirBlocks);
                 i += 4;
-                section.NonAirBlocks = BitConverter.ToInt32(nonAirBlocks, 0);
                 --sections;
             }
-
-            Buffer.BlockCopy(_Buffer, i, Light.Data, 0, Section.HALFSIZE);
+                
+            Buffer.BlockCopy(_Buffer, i, Light.Data, 0, HALFSIZE);
+            World.Server.Logger.Log(LogLevel.Info, "chunkLight: {0}", BitConverter.ToString(Light.Data));
             i += HALFSIZE;
-            Buffer.BlockCopy(_Buffer, i, SkyLight.Data, 0, Section.HALFSIZE);
-
-            /*strm.Read(Types, 0, SIZE);
-            strm.Read(Data.Data, 0, HALFSIZE);
-            strm.Read(Light.Data, 0, HALFSIZE);
-            strm.Read(SkyLight.Data, 0, HALFSIZE);*/
+            Buffer.BlockCopy(_Buffer, i, SkyLight.Data, 0, HALFSIZE);
+            World.Server.Logger.Log(LogLevel.Info, "chunkSkyLight: {0}\n", BitConverter.ToString(SkyLight.Data));
         }
 
         private bool EnterSave()
@@ -1263,10 +1494,9 @@ namespace Chraft.World
 
         private void WriteAllBlocks(Stream strm)
         {
-            int sections = _SectionsNum;
-            strm.WriteByte((byte)sections);
-            int i = 0;
-            while(sections > 0)
+            Queue<Section> toSave = new Queue<Section>();
+            int sections = 0;
+            for(int i = 0; i < 16; ++i)
             {
                 Section section = _Sections[i];
 
@@ -1274,25 +1504,38 @@ namespace Chraft.World
                 {
                     if (section.NonAirBlocks > 0)
                     {
-                        strm.WriteByte((byte)i);
-                        strm.Write(section.Types, 0, Section.SIZE);
-                        strm.Write(section.Data.Data, 0, Section.HALFSIZE);
-                        strm.Write(BitConverter.GetBytes(section.NonAirBlocks), 0, 4);
+                        ++sections;
+                        toSave.Enqueue(section);
                     }
                     else
-                        _Sections[i] = null;
+                        _Sections[i] = null; // Free some memory 
                 }
-
-                ++i;
-                --sections;
             }
+            World.Server.Logger.Log(LogLevel.Info, "Saving Chunk: {0} {1}", Coords.ChunkX, Coords.ChunkZ);
+            World.Server.Logger.Log(LogLevel.Info, "SectionsNum: {0}", sections);
+
+            strm.WriteByte((byte)sections);
+            
+            while(toSave.Count > 0)
+            {
+                Section section = toSave.Dequeue();
+                World.Server.Logger.Log(LogLevel.Info, "SectionId: {0}", section.SectionId);
+                World.Server.Logger.Log(LogLevel.Info, "sectionTypes: {0}", BitConverter.ToString(section.Types));
+                World.Server.Logger.Log(LogLevel.Info, "sectionData: {0}", BitConverter.ToString(section.Data.Data));
+                World.Server.Logger.Log(LogLevel.Info, "NonAirBlocks: {0}", section.NonAirBlocks);
+
+                Debug.Assert(section.SectionId < 16);
+                strm.WriteByte((byte)section.SectionId);
+                strm.Write(section.Types, 0, Section.SIZE);
+                strm.Write(section.Data.Data, 0, Section.HALFSIZE);
+                strm.Write(BitConverter.GetBytes(section.NonAirBlocks), 0, 4);
+            }
+
+            World.Server.Logger.Log(LogLevel.Info, "chunkLight: {0}", BitConverter.ToString(Light.Data));
+            World.Server.Logger.Log(LogLevel.Info, "chunkSkyLight: {0}\n", BitConverter.ToString(SkyLight.Data));
 
             strm.Write(Light.Data, 0, HALFSIZE);
             strm.Write(SkyLight.Data, 0, HALFSIZE);
-            /*strm.Write(Types, 0, SIZE);
-            strm.Write(Data.Data, 0, HALFSIZE);
-            strm.Write(Light.Data, 0, HALFSIZE);
-            strm.Write(SkyLight.Data, 0, HALFSIZE);*/
         }
 
         public void MarkToSave()

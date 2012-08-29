@@ -20,6 +20,7 @@ using System.Linq;
 using System.Collections.Generic;
 using Chraft.PluginSystem;
 using Chraft.Utilities;
+using Chraft.Utilities.Blocks;
 using Chraft.Utilities.Coords;
 using Chraft.World;
 using ICSharpCode.SharpZipLib.Zip.Compression;
@@ -71,12 +72,21 @@ namespace Chraft.Net.Packets
 
             int sectionsSent = 0;
 
-            for (int i = 0; i < 16; ++i )
-            {
-                Section currentSection = chunk.Sections[i];
-                if (currentSection != null)
-                    ++sectionsSent;
-            }
+            /*for (int x = 0; x < 16; ++x )
+                for (int y = 0; y < 256; ++y)
+                    for (int z = 0; z < 16; ++z)
+                    {
+                        BlockData.Blocks type = chunk.GetType(x, y, z);
+                        if(type == BlockData.Blocks.Air)
+                            chunk.SetSkyLight(x,y,z,15);
+                    }*/
+
+                for (int i = 0; i < 16; ++i)
+                {
+                    Section currentSection = chunk.Sections[i];
+                    if (currentSection != null)
+                        ++sectionsSent;
+                }
 
             int dataDim = (sectionsSent * Section.BYTESIZE) + 256; // (Number of sections * (Section dimension + Add array) + Biome array
 

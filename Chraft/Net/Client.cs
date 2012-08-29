@@ -98,10 +98,6 @@ namespace Chraft.Net
         /// </summary>
         internal Logger Logger { get { return Server.Logger; } }
 
-        internal byte[] SharedKey { get; set; }
-        internal ICryptoTransform Encrypter { get; set; }
-        internal ICryptoTransform Decrypter { get; set; }
-
         /// <summary>
         /// A unique Id used as the ServerId within the Authentication process
         /// </summary>

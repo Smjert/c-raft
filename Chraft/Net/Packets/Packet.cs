@@ -2299,8 +2299,6 @@ namespace Chraft.Net.Packets
         public short VerifyTokenLength { get; set; }
         public byte[] VerifyToken { get; set; }
 
-        protected override int Length { get { return 5 + SharedSecretLength + VerifyTokenLength; } }
-
         public override void Read(PacketReader reader)
         {
             ServerId = reader.ReadString16(20);
@@ -2337,16 +2335,6 @@ namespace Chraft.Net.Packets
         public override void Write()
         {
             SetCapacity();
-        }
-    }
-
-    public class DisconnectPacket : Packet
-    {
-        public string Reason { get; set; }
-
-        public override void Read(PacketReader stream)
-        {
-            Reason = stream.ReadString16(100);
         }
     }
 

@@ -880,15 +880,8 @@ namespace Chraft.Net
             else
             {
                 client.Host = packet.ServerHost + ":" + packet.ServerPort;
-                catch (Exception exc)
-                {
-                    client.Kick("Error while authenticating...");
-                    client.Logger.Log(exc);
-                    return;
-                }
-            }
 
-                if (client.Server.EncryptionEnabled)
+                if (client.Server.EncryptionEnabled && client.Server.UseOfficalAuthentication)
                     client.SendEncryptionRequest();
                 else if(IsAuthenticated(client))
                     Task.Factory.StartNew(client.SendLoginSequence);
