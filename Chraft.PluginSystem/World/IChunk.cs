@@ -55,8 +55,8 @@ namespace Chraft.PluginSystem.World
         void RecalculateHeight(int x, int z);
         void RecalculateSky();
         void RecalculateSky(int x, int z);
-        void SpreadLightFromBlock(byte x, byte y, byte z, byte light, byte oldHeight);
-        void SpreadSkyLightFromBlock(byte x, byte y, byte z, bool sourceBlock = false);
+        /*void SpreadLightFromBlock(byte x, byte y, byte z, byte light, byte oldHeight);
+        void SpreadSkyLightFromBlock(byte x, byte y, byte z, bool sourceBlock = false);*/
         void MarkToSave();
         bool IsAdjacentTo(UniversalCoords coords, byte block);
         bool IsNSEWTo(UniversalCoords coords, byte block);
